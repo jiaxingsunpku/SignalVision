@@ -44,7 +44,20 @@ runtime/records/
 runtime/results/
 runtime/model/
 runtime/checkpoints/
-runtime/data/output_data/
+runtime/data/output_data/*
+!runtime/data/output_data/README.md
+!runtime/data/output_data/tsc/
+runtime/data/output_data/tsc/*
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/
+runtime/data/output_data/tsc/sumo_colight_pytorch_agent/*
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/
+runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/*
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/README.md
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/test/
+runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/test/*
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/test/model/
+runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/test/model/*
+!runtime/data/output_data/tsc/sumo_colight_pytorch_agent/ezhou/test/model/200_0.pt
 runtime/tools/output/
 
 # OS/editor noise
