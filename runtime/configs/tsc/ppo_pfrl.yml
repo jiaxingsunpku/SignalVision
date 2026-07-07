@@ -1,0 +1,40 @@
+includes:
+  - configs/tsc/base.yml
+
+
+model:
+  name: ppo_pfrl
+  graphic: False
+  vehicle_max: 1
+  learning_rate: 0.00025   # pfrl PPO 内部硬编码为 2.5e-4，此处供统一读取
+  one_hot: True
+  phase: True
+  train_model: True
+  test_model: True
+  load_model: False
+
+
+trainer:
+  thread: 4
+  ngpu: -1
+  learning_start: -1        # pfrl PPO 必须从第一步调用 act()，设为 -1 保证始终走 get_action 分支
+  buffer_size: 360          # 与 _build_model 中的 update_interval 保持一致
+  steps: 3600
+  test_steps: 3600
+  action_interval: 10
+  episodes: 300
+  update_model_rate: 1
+  update_target_rate: 10
+  test_when_train: True
+  test_interval: 10
+
+
+logger:
+  log_dir: "logger"
+  replay_dir: "replay"
+  save_dir: "model"
+  data_dir: "dataset"
+  get_attention: False
+  ave_model: True
+  save_model: True
+  save_rate: 20

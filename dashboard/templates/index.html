@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交通信控系统</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- 左侧工具栏 -->
+        <div class="tool-sidebar" id="tool-sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-toggle" onclick="dashboard.toggleSidebar()">
+                    <span class="toggle-icon">☰</span>
+                </div>
+                <span class="sidebar-title">工具</span>
+            </div>
+            
+            <div class="tool-list">
+                <div class="tool-item" onclick="dashboard.openTool('agents')">
+                    <span class="tool-icon">🤖</span>
+                    <span class="tool-name">智能体列表</span>
+                </div>
+
+                <div class="tool-item" onclick="dashboard.openTool('data')">
+                    <span class="tool-icon">📊</span>
+                    <span class="tool-name">实时交通数据</span>
+                </div>
+                
+                <div class="tool-item" onclick="dashboard.openTool('models')">
+                    <span class="tool-icon">🗂️</span>
+                    <span class="tool-name">模型管理</span>
+                </div>
+                
+                <div class="tool-item" onclick="dashboard.openTool('comparison')">
+                    <span class="tool-icon">📈</span>
+                    <span class="tool-name">持续学习</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 主内容区域 -->
+        <div class="main-content">
+            <!-- 地图区域 -->
+            <div class="map-area">
+            <canvas id="map-canvas"></canvas>
+
+            <div class="inference-hud" id="inference-hud">
+                <div class="hud-head">
+                    <div>
+                        <div class="hud-kicker">Multi-Agent Signal Control</div>
+                        <div class="hud-title">多智能体信号灯控制推理</div>
+                    </div>
+                    <div class="hud-mode" id="inference-mode">SUMO / LibSignal</div>
+                </div>
+                <div class="hud-grid">
+                    <div class="hud-metric">
+                        <span class="hud-label">智能体</span>
+                        <strong id="hud-active-agents">0</strong>
+                    </div>
+                    <div class="hud-metric">
+                        <span class="hud-label">车辆</span>
+                        <strong id="hud-total-vehicles">0</strong>
+                    </div>
+                    <div class="hud-metric">
+                        <span class="hud-label">等待</span>
+                        <strong id="hud-total-waiting">0</strong>
+                    </div>
+                    <div class="hud-metric">
+                        <span class="hud-label">均速</span>
+                        <strong id="hud-avg-speed">0.0 km/h</strong>
+                    </div>
+                    <div class="hud-metric">
+                        <span class="hud-label">时间步</span>
+                        <strong id="hud-current-step">待机</strong>
+                    </div>
+                </div>
+                <div class="hud-status">
+                    <span class="hud-status-dot"></span>
+                    <span id="inference-status">等待数据</span>
+                </div>
+            </div>
+
+            <div class="map-legend">
+                <div class="legend-title">拥堵热力</div>
+                <div class="legend-row"><span class="legend-swatch smooth"></span><span>畅通</span></div>
+                <div class="legend-row"><span class="legend-swatch slow"></span><span>缓行</span></div>
+                <div class="legend-row"><span class="legend-swatch jam"></span><span>拥堵</span></div>
+            </div>
+            
+            <!-- 缩放控制 -->
+            <div class="zoom-controls">
+                <button class="zoom-btn" onclick="dashboard.zoomIn()">+</button>
+                <button class="zoom-btn" onclick="dashboard.zoomOut()">−</button>
+                <button class="zoom-btn reset" onclick="dashboard.resetView()">⌂</button>
+            </div>
+            
+            <!-- 比例指示器 -->
+            <div class="scale-indicator" id="scale-indicator">
+                缩放: 100%
+            </div>
+            
+            <!-- 工具提示 -->
+            <div class="tooltip" id="tooltip"></div>
+            
+            <!-- 加载指示器 -->
+            <div class="loading-overlay" id="loading" style="display: none;">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">正在加载...</div>
+            </div>
+            
+            <!-- 底部显示设置控制面板 -->
+            <div class="display-controls" id="display-controls" style="display: none;">
+                <div class="controls-container">
+                    <div class="controls-group">
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="show-edges" checked onchange="dashboard.updateDisplay()">
+                            <span>道路</span>
+                        </label>
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="show-nodes" checked onchange="dashboard.updateDisplay()">
+                            <span>节点</span>
+                        </label>
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="show-junctions" checked onchange="dashboard.updateDisplay()">
+                            <span>路口</span>
+                        </label>
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="show-labels" onchange="dashboard.updateDisplay()">
+                            <span>标签</span>
+                        </label>
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="show-congestion" checked onchange="dashboard.updateDisplay()">
+                            <span>拥堵</span>
+                        </label>
+                    </div>
+                    
+                    <div class="controls-divider"></div>
+                    
+                    <div class="controls-group">
+                        <div class="control-slider">
+                            <label>线条: <span id="line-width-value">2</span></label>
+                            <input type="range" id="line-width" min="1" max="10" value="2" 
+                                   oninput="dashboard.updateDisplay()">
+                        </div>
+                        <div class="control-slider">
+                            <label>节点: <span id="node-size-value">6</span></label>
+                            <input type="range" id="node-size" min="2" max="20" value="6" 
+                                   oninput="dashboard.updateDisplay()">
+                        </div>
+                    </div>
+                    
+                    <div class="controls-divider"></div>
+                    
+                    <div class="controls-group">
+                        <label class="control-checkbox">
+                            <input type="checkbox" id="enable-lane-filter" checked onchange="dashboard.updateDisplay()">
+                            <span>车道过滤</span>
+                        </label>
+                        <div class="control-slider">
+                            <label>最小车道: <span id="min-lanes-value">2</span></label>
+                            <input type="range" id="min-lanes" min="1" max="10" value="2" 
+                                   oninput="dashboard.updateDisplay()">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 侧边详情面板 -->
+        <div class="detail-panel" id="detail-panel">
+            <div class="panel-header">
+                <h2 id="panel-title">路口详情</h2>
+                <button class="close-btn" onclick="dashboard.closeDetailPanel()">×</button>
+            </div>
+            
+            <div class="panel-content" id="panel-content">
+                <div class="panel-placeholder">
+                    <div class="placeholder-icon">🗺️</div>
+                    <p>点击地图上的路口查看详细信息</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 顶部工具栏 -->
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <h1 class="toolbar-title">交通信控系统</h1>
+            </div>
+            
+            <div class="toolbar-right">
+                <!-- 刷新按钮 -->
+                <button class="toolbar-btn" onclick="dashboard.refreshData()" title="刷新数据">
+                    <span class="btn-icon">🔄</span>
+                    刷新
+                </button>
+                
+                <!-- 显示设置 -->
+                <button class="toolbar-btn" onclick="dashboard.toggleDisplaySettings()">
+                    <span class="btn-icon">⚙️</span>
+                    显示设置
+                </button>
+                
+                <!-- 统计信息 -->
+                <button class="toolbar-btn" onclick="dashboard.showStatistics()" title="统计信息">
+                    <span class="btn-icon">📊</span>
+                    统计
+                </button>
+                
+                <!-- 连接状态指示 -->
+                <div class="connection-status" id="connection-status" onclick="dashboard.showConnectionPanel()" title="点击管理连接">
+                    <span class="status-dot"></span>
+                    <span class="status-text">未连接</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 统计浮窗 -->
+        <div class="stats-overlay" id="stats-overlay" style="display: none;">
+            <div class="stats-panel">
+                <div class="stats-header">
+                    <h3>网络统计</h3>
+                    <button class="close-btn" onclick="dashboard.hideStatistics()">×</button>
+                </div>
+                <div class="stats-content" id="stats-content">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
+        </div>
+        
+        <!-- 连接控制面板 -->
+        <div class="connection-overlay" id="connection-overlay" style="display: none;">
+            <div class="connection-panel">
+                <div class="panel-header">
+                    <h3>连接控制</h3>
+                    <button class="close-btn" onclick="dashboard.hideConnectionPanel()">×</button>
+                </div>
+                <div class="connection-content">
+                    <!-- 当前状态 -->
+                    <div class="connection-status-section">
+                        <h4>当前状态</h4>
+                        <div class="status-display">
+                            <span class="status-dot-large" id="conn-status-dot"></span>
+                            <div class="status-info">
+                                <div class="status-label" id="conn-status-label">未连接</div>
+                                <div class="status-detail" id="conn-status-detail">等待连接...</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 连接选项 -->
+                    <div class="connection-options">
+                        <h4>连接选项</h4>
+                        
+                        <!-- 启动SUMO模拟 -->
+                        <div class="connection-option">
+                            <div class="option-header">
+                                <span class="option-icon">🚦</span>
+                                <div class="option-info">
+                                    <div class="option-title">启动SUMO模拟</div>
+                                    <div class="option-desc" id="sumo-desc">
+                                        运行本地交通仿真测试 | 场景: <span id="current-sim-map">加载中...</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="option-controls">
+                                <select id="sumo-map" class="config-select">
+                                    <option value="">加载地图中...</option>
+                                </select>
+                                <select id="sumo-config" class="config-select">
+                                    <option value="">加载中...</option>
+                                </select>
+                                <button class="action-btn primary-btn" onclick="dashboard.startSumoSimulation()" 
+                                        id="start-sumo-btn">
+                                    启动仿真
+                                </button>
+                                <button class="action-btn secondary-btn" onclick="dashboard.stopSumoSimulation()" 
+                                        id="stop-sumo-btn" style="display: none;">
+                                    停止
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- 连接实际交管系统 -->
+                        <div class="connection-option">
+                            <div class="option-header">
+                                <span class="option-icon">🌐</span>
+                                <div class="option-info">
+                                    <div class="option-title">连接交管系统</div>
+                                    <div class="option-desc">连接到实际交通管理系统（开发中）</div>
+                                </div>
+                            </div>
+                            <div class="option-controls">
+                                <input type="text" id="traffic-system-url" placeholder="系统地址" 
+                                       class="url-input" disabled>
+                                <button class="action-btn secondary-btn" disabled>
+                                    连接
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 日志输出 -->
+                    <div class="connection-log-section">
+                        <h4>运行日志</h4>
+                        <div class="log-container" id="connection-log">
+                            <div class="log-empty">暂无日志</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 主内容区域结束 -->
+        </div>
+    </div>
+    
+    <script src="/static/js/visualization.js"></script>
+    <script src="/static/js/junction-panel.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

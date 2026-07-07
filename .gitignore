@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Runtime artifacts
+*.log
+*.pid
+*.tmp
+*.swp
+*.swo
+
+# Agent/local backup files
+AGENT.md
+AGENTS.md
+CLAUDE.md
+memory.md
+phases/
+*.anp-bak-*
+*.bak
+*.orig
+*.rej
+
+# SignalVision generated artifacts
+cache/
+dashboard/cache/
+dashboard/experiments/
+dashboard/integration/.anp_topology.json
+runtime/output/
+runtime/log/
+runtime/cache/
+runtime/records/
+runtime/results/
+runtime/model/
+runtime/checkpoints/
+runtime/data/output_data/
+runtime/tools/output/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,66 @@
+<div class="tool-panel side-panel" id="agents-tool-panel">
+    <div class="tool-header">
+        <h2>🤖 智能体列表</h2>
+        <div class="tool-header-info">
+            <span class="header-badge">Junction Agents</span>
+            <span class="header-text">浏览当前地图中的路口智能体</span>
+        </div>
+        <button class="close-btn" onclick="dashboard.closeTool()">×</button>
+    </div>
+
+    <div class="tool-content agents-content">
+        <div class="agents-sidebar">
+            <div class="config-section">
+                <h3>列表信息</h3>
+                <div class="agent-summary-card">
+                    <div class="agent-summary-label">当前地图</div>
+                    <div class="agent-summary-value" id="agents-current-map">加载中...</div>
+                </div>
+                <div class="agent-summary-card">
+                    <div class="agent-summary-label">智能体数量</div>
+                    <div class="agent-summary-value" id="agents-count">0</div>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h3>筛选</h3>
+                <div class="form-group">
+                    <label>搜索智能体</label>
+                    <input type="text" id="agents-search" class="form-input" placeholder="输入路口ID...">
+                </div>
+                <div class="form-group">
+                    <label>路口类型</label>
+                    <select id="agents-type-filter" class="form-select">
+                        <option value="">全部类型</option>
+                        <option value="traffic_light">信号灯</option>
+                        <option value="priority">优先通行</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="agents-main-panel">
+            <div class="agents-list-panel">
+                <div class="agents-list-header">
+                    <h3>智能体列表</h3>
+                    <div class="agents-list-meta" id="agents-list-meta">加载中...</div>
+                </div>
+                <div class="agents-list" id="agents-list">
+                    <div class="loading-message">正在加载智能体列表...</div>
+                </div>
+            </div>
+
+            <div class="agents-detail-pane" id="agents-detail-panel">
+                <div class="panel-header">
+                    <h2 id="agents-detail-title">智能体详情</h2>
+                </div>
+                <div class="panel-content" id="agents-detail-content">
+                    <div class="panel-placeholder">
+                        <div class="placeholder-icon">🤖</div>
+                        <p>点击列表中的智能体查看详细信息</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

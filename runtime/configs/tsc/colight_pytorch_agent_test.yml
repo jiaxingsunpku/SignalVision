@@ -1,0 +1,40 @@
+includes:
+  - configs/tsc/base.yml
+
+# ===== 测试模式配置 =====
+# 加载已训练的 colight_pytorch_agent 模型进行测试
+
+model:
+  name: colight_pytorch_agent  # 必须与注册的类名一致
+  train_model: False    # 关闭训练
+  test_model: True      # 开启测试
+  load_model: True      # 加载已训练模型
+  graphic: True
+  vehicle_max: 1
+  epsilon: 0.0          # 测试时不探索，使用确定性策略
+  epsilon_decay: 0.9995
+  epsilon_min: 0.01
+  NEIGHBOR_NUM: 4
+  NEIGHBOR_EDGE_NUM: 4
+  N_LAYERS: 1
+  INPUT_DIM: [128, 128]
+  OUTPUT_DIM: [128, 128]
+  NODE_EMB_DIM: [128, 128]
+  NUM_HEADS: [5, 5]
+  NODE_LAYER_DIMS_EACH_HEAD: [16, 16]
+  OUTPUT_LAYERS: []
+  one_hot: True
+  phase: False
+
+trainer:
+  learning_start: 1000
+  episodes: 130         # 加载第130个epoch的模型 (130_0.pt)
+  test_steps: 3600      # 测试步数
+  test_when_train: False
+
+world:
+  saveReplay: False     # 是否保存回放
+  gui: False            # 远程服务器关闭GUI
+
+logger:
+  save_model: False     # 测试时不保存模型

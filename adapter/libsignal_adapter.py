@@ -1,0 +1,634 @@
+"""
+LibSignal 运行时适配器
+
+将搬运进 rebuild/runtime 的 LibSignal 原始运行内核，
+封装成 Dashboard 期望的标准接口。
+"""
+
+import logging
+import os
+import sys
+import importlib
+import importlib.util
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import numpy as np
+
+from .config_converter import ConfigConverter
+from .network_data_loader import load_network_from_runtime
+from .standard_interface import StandardArgs, StandardInterface, StandardSimulation, StandardSolver
+
+
+RUNTIME_ROOT = Path(__file__).parent.parent / 'runtime'
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+_libsignal_imported = False
+_import_error = None
+
+
+def _clear_libsignal_modules():
+    """清理通用顶级模块名，避免和宿主进程中的其他包冲突。"""
+    managed_prefixes = (
+        'common',
+        'utils',
+        'agent',
+        'dataset',
+        'task',
+        'runner',
+        'trainer',
+        'world',
+    )
+    stale_keys = []
+    for name in list(sys.modules.keys()):
+        if name in managed_prefixes or name.startswith(tuple(f"{prefix}." for prefix in managed_prefixes)):
+            stale_keys.append(name)
+    for name in stale_keys:
+        sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+
+def _load_inner_package(module_name: str):
+    """从 rebuild/runtime 目录显式加载顶级包，避免和宿主进程同名目录冲突。"""
+    package_dir = RUNTIME_ROOT / module_name
+    init_file = package_dir / '__init__.py'
+    if not init_file.exists():
+        raise ImportError(f"LibSignal 包不存在: {module_name} ({init_file})")
+
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        init_file,
+        submodule_search_locations=[str(package_dir)],
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法创建 LibSignal 包规格: {module_name}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _import_libsignal():
+    """延迟导入 LibSignal 原始模块，保证注册副作用生效。"""
+    global _libsignal_imported, _import_error
+
+    if _libsignal_imported:
+        return True
+
+    try:
+        global Registry, interface_module, build_config, setup_logging
+
+        _clear_libsignal_modules()
+
+        from common.registry import Registry
+        from common import interface as interface_module
+        from utils.logger import build_config, setup_logging
+
+        importlib.import_module('agent')
+        importlib.import_module('dataset')
+        importlib.import_module('task')
+        importlib.import_module('task.task')
+        _load_inner_package('runner')
+        importlib.import_module('runner.base_runner')
+        importlib.import_module('runner.tsc_runner')
+        importlib.import_module('world')
+
+        missing = []
+        if 'tsc' not in Registry.mapping['task_mapping']:
+            missing.append(
+                f"task_mapping 缺少 tsc，当前 keys={sorted(Registry.mapping['task_mapping'].keys())}"
+            )
+        if 'tsc' not in Registry.mapping['trainer_mapping']:
+            missing.append(
+                f"trainer_mapping 缺少 tsc，当前 keys={sorted(Registry.mapping['trainer_mapping'].keys())}"
+            )
+        if missing:
+            raise ImportError("LibSignal 注册不完整: " + "; ".join(missing))
+
+        _libsignal_imported = True
+        return True
+    except Exception as exc:  # pragma: no cover - 运行期依赖错误
+        _import_error = exc
+        return False
+
+
+def create_libsignal_args(std_args: StandardArgs):
+    """创建 LibSignal 原始参数对象。"""
+    return ConfigConverter.standard_to_libsignal(std_args)
+
+
+class LibSignalSimulation(StandardSimulation):
+    """
+    LibSignal 仿真适配器。
+    """
+
+    def __init__(self, args: StandardArgs, nogui: bool = True):
+        if not _import_libsignal():
+            raise ImportError(f"无法导入 LibSignal 模块: {_import_error}")
+
+        self.std_args = args
+        self.nogui = nogui
+        self.libsignal_args = create_libsignal_args(args)
+
+        self.config = None
+        self.logger = None
+        self.trainer = None
+        self.world = None
+        self.agents = None
+        self.env = None
+        self.metric = None
+
+        self._initialized = False
+        self._started = False
+        self._interface = None
+        self._signal_complete = False
+        self._vehiclegen = None
+        self._pending_actions = None
+        self.step_count = 0
+
+        print(
+            f"[LibSignalSimulation] 初始化完成: world={self.libsignal_args.world}, "
+            f"network={self.libsignal_args.network}, agent={self.libsignal_args.agent}"
+        )
+
+    def _override_runtime_flags(self):
+        if getattr(self.libsignal_args, 'load_model', None) is not None:
+            self.config['model']['load_model'] = self.libsignal_args.load_model
+        if getattr(self.libsignal_args, 'test_model', None) is not None:
+            self.config['model']['test_model'] = self.libsignal_args.test_model
+        if getattr(self.libsignal_args, 'train_model', None) is not None:
+            self.config['model']['train_model'] = self.libsignal_args.train_model
+        if getattr(self.libsignal_args, 'load_episode', None) is not None:
+            self.config['trainer']['episodes'] = self.libsignal_args.load_episode
+
+        if self.config['model'].get('test_model') and 'epsilon' in self.config['model']:
+            self.config['model']['epsilon'] = 0.0
+
+    def _register_config(self):
+        interface_module.Command_Setting_Interface(self.config)
+        interface_module.Logger_param_Interface(self.config)
+        interface_module.World_param_Interface(self.config)
+        if self.config['model'].get('graphic', False):
+            param = Registry.mapping['world_mapping']['setting'].param
+            if self.config['command']['world'] in {'sumo', 'cityflow'}:
+                roadnet_path = param['dir'] + param['roadnetFile']
+            else:
+                roadnet_path = param['road_file_addr']
+            interface_module.Graph_World_Interface(roadnet_path)
+        interface_module.Logger_path_Interface(self.config)
+        output_path = Registry.mapping['logger_mapping']['path'].path
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        interface_module.Trainer_param_Interface(self.config)
+        interface_module.ModelAgent_param_Interface(self.config)
+
+    def _load_models_if_needed(self):
+        if not self.config['model'].get('load_model', False):
+            print("[LibSignalSimulation] 跳过模型加载 (load_model=False)")
+            return
+
+        if not self.agents or not hasattr(self.agents[0], 'load_model'):
+            print(f"[LibSignalSimulation] {self.config['command']['agent']} 不支持模型加载")
+            return
+
+        load_episode = self.config['trainer'].get('episodes', 200)
+        print(f"[LibSignalSimulation] 准备加载模型: epoch={load_episode}")
+        for agent in self.agents:
+            agent.load_model(load_episode)
+        print(f"[LibSignalSimulation] 模型加载完成: {len(self.agents)} 个 agents")
+
+    def gen_sim(self):
+        if self._initialized:
+            return
+
+        original_dir = os.getcwd()
+        try:
+            os.chdir(RUNTIME_ROOT)
+            self.config, _ = build_config(self.libsignal_args)
+            self._override_runtime_flags()
+            self._register_config()
+
+            self.logger = setup_logging(logging.INFO)
+            trainer_class = Registry.mapping['trainer_mapping'][self.config['command']['task']]
+            self.trainer = trainer_class(self.logger)
+
+            self.world = self.trainer.world
+            self.agents = self.trainer.agents
+            self.metric = self.trainer.metric
+            self.env = self.trainer.env
+            self._load_models_if_needed()
+
+            self._initialized = True
+            print(f"[LibSignalSimulation] 仿真环境生成完成: {len(self.world.intersections)} 个路口")
+        except Exception as exc:
+            raise RuntimeError(f"生成仿真环境失败: {exc}") from exc
+        finally:
+            os.chdir(original_dir)
+
+    def start(self):
+        if not self._initialized:
+            self.gen_sim()
+        if self._started:
+            return
+
+        self.env.reset()
+        self._pending_actions = None
+        self.step_count = 0
+        self._started = True
+        print("[LibSignalSimulation] 仿真已启动")
+
+    def _sim_step_sumo(self):
+        for _ in range(self.world.step_ratio):
+            self.world.eng.simulationStep()
+
+        for intersection in self.world.intersections:
+            intersection.observe(self.world.step_length, self.world.max_distance)
+
+        entering_v = self.world.eng.simulation.getDepartedIDList()
+        exiting_v = self.world.eng.simulation.getArrivedIDList()
+        for vehicle_id in entering_v:
+            self.world.inside_vehicles[vehicle_id] = self.world.eng.simulation.getTime()
+        for vehicle_id in exiting_v:
+            if vehicle_id in self.world.inside_vehicles:
+                self.world.vehicles[vehicle_id] = (
+                    self.world.eng.simulation.getTime() - self.world.inside_vehicles[vehicle_id]
+                )
+                del self.world.inside_vehicles[vehicle_id]
+
+        self.world._update_infos()
+        self.world.vehicle_trajectory, self.world.vehicle_maxspeed = self.world.get_vehicle_trajectory()
+        self.world.run += 1
+        self.step_count = self.world.run
+
+        if self.step_count <= 5:
+            try:
+                active_count = len(self.world.eng.vehicle.getIDList())
+            except Exception:
+                active_count = -1
+            try:
+                min_expected = self.world.eng.simulation.getMinExpectedNumber()
+            except Exception:
+                min_expected = -1
+            print(
+                f"[LibSignalSimulation] SUMO step={self.step_count} "
+                f"time={self.world.eng.simulation.getTime()} "
+                f"departed={len(entering_v)} arrived={len(exiting_v)} "
+                f"active={active_count} min_expected={min_expected}"
+            )
+
+    def _sim_step_cityflow(self):
+        self.world.step(self._pending_actions)
+        self._pending_actions = None
+        self.step_count += 1
+
+    def sim_step(self):
+        if not self._started:
+            raise RuntimeError("仿真未启动，请先调用 start()")
+
+        world_name = self.config['command']['world']
+        if world_name == 'cityflow':
+            self._sim_step_cityflow()
+        else:
+            self._sim_step_sumo()
+
+    def update_netdata(self):
+        pass
+
+    def update_travel_times(self):
+        pass
+
+    def set_interface(self, interface):
+        self._interface = interface
+
+    def close(self):
+        if self.world is not None and getattr(self.world, 'eng', None) is not None:
+            close_fn = getattr(self.world.eng, 'close', None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        self._started = False
+        print("[LibSignalSimulation] 仿真已关闭")
+
+    @property
+    def current_time(self) -> float:
+        if not self.world:
+            return 0.0
+        try:
+            if self.config['command']['world'] == 'cityflow':
+                return float(self.world.eng.get_current_time())
+            return float(self.world.eng.simulation.getTime())
+        except Exception:
+            return 0.0
+
+    @property
+    def vehiclegen(self):
+        return self._vehiclegen
+
+    @property
+    def signal_complete(self) -> bool:
+        return self._signal_complete
+
+    @signal_complete.setter
+    def signal_complete(self, value: bool):
+        self._signal_complete = value
+
+
+class LibSignalSolver(StandardSolver):
+    """
+    LibSignal 算法求解器适配器。
+    """
+
+    def __init__(self, args: StandardArgs):
+        self.std_args = args
+        self.agents = None
+        self._interface = None
+
+    def set_interface(self, interface):
+        self._interface = interface
+        if hasattr(interface, 'sim') and hasattr(interface.sim, 'agents'):
+            self.agents = interface.sim.agents
+
+    def get_action(self, state: Any) -> Any:
+        if not self.agents:
+            return None
+        actions = []
+        for agent in self.agents:
+            ob = agent.get_ob()
+            phase = agent.get_phase()
+            action = agent.get_action(ob, phase, test=True)
+            if np.isscalar(action):
+                actions.append(int(action))
+            else:
+                actions.extend(np.asarray(action).reshape(-1).tolist())
+        return actions
+
+    def reset(self):
+        if not self.agents:
+            return
+        for agent in self.agents:
+            if hasattr(agent, 'reset'):
+                agent.reset()
+
+
+class LibSignalInterface(StandardInterface):
+    """
+    LibSignal Dashboard 接口适配器。
+    """
+
+    def __init__(self, sim: LibSignalSimulation, sys: LibSignalSolver, junction_manager, step_delay: float = 0.0):
+        self.sim = sim
+        self.sys = sys
+        self.junction_manager = junction_manager
+        self.step_delay = step_delay
+
+        self._subscription_cache = {
+            'lane_data': {},
+            'traffic_light_data': {},
+            'vehicle_data': {},
+        }
+        self._cached_netdata = None
+        self._last_actions = None
+        self._action_interval = (
+            sim.config['trainer'].get('action_interval', 10) if sim.config and 'trainer' in sim.config else 10
+        )
+
+        sys.set_interface(self)
+        print(f"[LibSignalInterface] 初始化完成: action_interval={self._action_interval}")
+
+        # ANP 控制层相位注入消费（task5）：订阅 control.phase 填槽，写灯口据此覆盖内置算法
+        self._anp_phase = None
+        self._anp_max_lag_steps = int(os.environ.get("ANP_MAX_LAG_STEPS", "30"))
+        self._anp_max_age_sec = float(os.environ.get("ANP_MAX_AGE_SEC", "12"))  # 世界时钟 v1：挂钟新鲜度上限(秒)
+        self._anp_injected = 0
+        self._anp_fallback = 0
+        if os.environ.get("ANP_SV_ENABLE", "1") != "0":
+            try:
+                from dashboard.integration.anp_kafka import AnpPhaseConsumer
+                self._anp_phase = AnpPhaseConsumer()
+                self._anp_phase.start()
+                print("[LibSignalInterface][ANP] 相位注入消费 = "
+                      + ("on" if self._anp_phase.available else "off(降级)")
+                      + "; max_age_sec=" + str(self._anp_max_age_sec)
+                      + " max_lag_steps=" + str(self._anp_max_lag_steps))
+            except Exception as e:
+                print("[LibSignalInterface][ANP] 相位消费初始化失败（降级）: " + str(e))
+                self._anp_phase = None
+
+    def _collect_actions(self):
+        if not self.sim.agents:
+            return []
+
+        actions = []
+        for agent in self.sim.agents:
+            ob = agent.get_ob()
+            phase = agent.get_phase()
+            agent_actions = agent.get_action(ob, phase, test=True)
+            if np.isscalar(agent_actions):
+                actions.append(int(agent_actions))
+            else:
+                actions.extend(np.asarray(agent_actions).reshape(-1).astype(int).tolist())
+        return actions
+
+    def signal_update(self):
+        self.sim.signal_complete = False
+        try:
+            self.update_subscription_cache()
+
+            should_make_decision = (self.sim.step_count % self._action_interval == 0)
+            if should_make_decision:
+                all_actions = self._collect_actions()
+                self._last_actions = all_actions
+            else:
+                all_actions = self._last_actions if self._last_actions is not None else []
+
+            world_name = self.sim.config['command']['world']
+            if all_actions:
+                if world_name == 'cityflow':
+                    self.sim._pending_actions = all_actions[:len(self.sim.world.intersections)]
+                else:
+                    for idx, action in enumerate(all_actions):
+                        if idx < len(self.sim.world.intersections):
+                            inter = self.sim.world.intersections[idx]
+                            action = self._anp_override_action(inter, action)  # task5：外部相位覆盖
+                            inter.pseudo_step(int(action))
+
+            self.sim.signal_complete = True
+        except Exception:
+            self.sim.signal_complete = True
+            raise
+
+    def _anp_override_action(self, inter, builtin_action):
+        """task5/世界时钟 v1：有未过期外部相位则覆盖内置 action；过期/非法/缺失回落内置（A3/A4）。
+
+        过期判据统一用**挂钟新鲜度**（``based_on_event_ts``）：``age=now−event_ts>max_age`` → 回落,
+        统一 SUMO/视频等多源(真实源无 sim_step、只走挂钟)。SUMO 源叠加 ``sim_step`` lag 旁路
+        (ANP_MAX_LAG_STEPS>0 时,防仿真加速下注入仿真上已过时的相位)。
+        """
+        if self._anp_phase is None:
+            return builtin_action
+        latest = self._anp_phase.get_latest(inter.id)
+        if latest is None:
+            return builtin_action
+        phase_index, based_on_sim_step, based_on_event_ts, _recv = latest
+        # 主判据：挂钟新鲜度(世界时钟 v1)。带 based_on_event_ts 则据此判;否则回落 sim_step(兼容旧消息)。
+        from dashboard.integration.anp_kafka import wall_age_seconds
+        if based_on_event_ts is not None:
+            age = wall_age_seconds(based_on_event_ts)
+            if age is None or age > self._anp_max_age_sec:
+                self._anp_fallback += 1
+                return builtin_action
+        elif based_on_sim_step is None:
+            self._anp_fallback += 1  # 两个时间基都缺失 → 保守回落
+            return builtin_action
+        # SUMO 源附加旁路:sim_step 落后过多也回落(ANP_MAX_LAG_STEPS>0 启用;真实源不带 sim_step 则跳过)
+        if self._anp_max_lag_steps > 0 and based_on_sim_step is not None:
+            if self.sim.step_count - based_on_sim_step > self._anp_max_lag_steps:
+                self._anp_fallback += 1
+                return builtin_action
+        # 合法性：phase_index ∈ [0, n_phases-1]（SV 写灯口本地 Safety Guard）
+        if not (0 <= phase_index < len(inter.phases)):
+            self._anp_fallback += 1
+            return builtin_action
+        self._anp_injected += 1
+        return phase_index
+
+    def get_netdata(self) -> Dict[str, Any]:
+        if not self.sim.world:
+            return {}
+        if self._cached_netdata is not None:
+            return self._cached_netdata
+
+        world_name = self.sim.config['command']['world']
+        network_name = self.sim.config['command']['network']
+        netdata = load_network_from_runtime(network_name, RUNTIME_ROOT, world=world_name)
+
+        for intersection in self.sim.world.intersections:
+            if intersection.id in netdata.get('inter', {}):
+                netdata['inter'][intersection.id]['phases'] = list(getattr(intersection, 'phases', []))
+
+        self._cached_netdata = netdata
+        return netdata
+
+    @property
+    def subscription_cache(self) -> Dict[str, Any]:
+        return self._subscription_cache
+
+    def _get_sumo_lane_occupancy(self, eng, lane_id, vehicle_count, waiting_count):
+        try:
+            return float(eng.lane.getLastStepOccupancy(lane_id))
+        except Exception:
+            if vehicle_count <= 0:
+                return 0.0
+            return min(float(waiting_count) / max(vehicle_count, 1) * 100.0, 100.0)
+
+    def _build_lane_cache_sumo(self):
+        eng = self.sim.world.eng
+        lane_counts = self.sim.world.get_lane_vehicle_count()
+        waiting_counts = self.sim.world.get_lane_waiting_vehicle_count()
+
+        lane_data = {}
+        for lane_id, vehicle_count in lane_counts.items():
+            waiting_count = waiting_counts.get(lane_id, 0)
+            mean_speed = eng.lane.getLastStepMeanSpeed(lane_id) if vehicle_count > 0 else 0.0
+            lane_data[lane_id] = {
+                'vehicle_number': vehicle_count,
+                'mean_speed': mean_speed,
+                'occupancy': self._get_sumo_lane_occupancy(eng, lane_id, vehicle_count, waiting_count),
+                'halting_number': waiting_count,
+            }
+        return lane_data
+
+    def _build_lane_cache_cityflow(self):
+        eng = self.sim.world.eng
+        lane_counts = eng.get_lane_vehicle_count()
+        waiting_counts = eng.get_lane_waiting_vehicle_count()
+        lane_vehicles = eng.get_lane_vehicles()
+        vehicle_speeds = eng.get_vehicle_speed()
+
+        lane_data = {}
+        for lane_id, vehicle_count in lane_counts.items():
+            waiting_count = waiting_counts.get(lane_id, 0)
+            vehicles = lane_vehicles.get(lane_id, [])
+            if vehicles:
+                mean_speed = sum(vehicle_speeds.get(vehicle_id, 0.0) for vehicle_id in vehicles) / len(vehicles)
+            else:
+                mean_speed = 0.0
+            lane_data[lane_id] = {
+                'vehicle_number': vehicle_count,
+                'mean_speed': mean_speed,
+                'occupancy': min(waiting_count / max(vehicle_count, 1) * 100.0, 100.0) if vehicle_count else 0.0,
+                'halting_number': waiting_count,
+            }
+        return lane_data
+
+    def _build_tl_cache_sumo(self):
+        eng = self.sim.world.eng
+        tl_data = {}
+        step_length = self.sim.world.step_length
+        for intersection in self.sim.world.intersections:
+            current_phase_idx = intersection.current_phase
+            phase_state = eng.trafficlight.getRedYellowGreenState(intersection.id)
+            phase_duration_seconds = intersection.current_phase_time * step_length
+            steps_until_next_decision = self._action_interval - (self.sim.step_count % self._action_interval)
+            if intersection.current_phase_time < intersection.yellow_phase_time:
+                steps_until_can_switch = intersection.yellow_phase_time - intersection.current_phase_time
+            else:
+                steps_until_can_switch = steps_until_next_decision
+
+            tl_data[intersection.id] = {
+                'phase_state': phase_state,
+                'phase_duration': float(phase_duration_seconds),
+                'phase_index': current_phase_idx,
+                'next_switch': float(steps_until_can_switch * step_length),
+            }
+        return tl_data
+
+    def _build_cityflow_phase_state(self, intersection) -> str:
+        light_count = max(1, len(getattr(intersection, 'startlanes', [])))
+        if getattr(intersection, '_current_phase', None) in getattr(intersection, 'yellow_phase_id', []):
+            return 'y' * light_count
+
+        phase_index = getattr(intersection, 'current_phase', 0)
+        available = getattr(intersection, 'phase_available_startlanes', [])
+        active_count = len(available[phase_index]) if phase_index < len(available) else 0
+        if active_count <= 0:
+            return 'r' * light_count
+        return 'G' * active_count + 'r' * max(0, light_count - active_count)
+
+    def _build_tl_cache_cityflow(self):
+        tl_data = {}
+        interval = float(self.sim.config.get('world', {}).get('interval', 1.0))
+        for intersection in self.sim.world.intersections:
+            phase_duration = float(getattr(intersection, 'current_phase_time', 0.0))
+            if getattr(intersection, '_current_phase', None) in getattr(intersection, 'yellow_phase_id', []):
+                remaining = max(float(intersection.yellow_phase_time) - phase_duration, 0.0)
+            else:
+                steps_until_next_decision = self._action_interval - (self.sim.step_count % self._action_interval)
+                remaining = float(steps_until_next_decision * interval)
+
+            tl_data[intersection.id] = {
+                'phase_state': self._build_cityflow_phase_state(intersection),
+                'phase_duration': phase_duration,
+                'phase_index': getattr(intersection, 'current_phase', 0),
+                'next_switch': remaining,
+            }
+        return tl_data
+
+    def update_subscription_cache(self):
+        if not self.sim.world:
+            return
+
+        world_name = self.sim.config['command']['world']
+        if world_name == 'cityflow':
+            lane_data = self._build_lane_cache_cityflow()
+            tl_data = self._build_tl_cache_cityflow()
+        else:
+            lane_data = self._build_lane_cache_sumo()
+            tl_data = self._build_tl_cache_sumo()
+
+        self._subscription_cache['lane_data'] = lane_data
+        self._subscription_cache['traffic_light_data'] = tl_data

@@ -1,0 +1,36 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "debug": false
+  },
+  "map": {
+    "directory": "cache",
+    "default_map": "ezhou",
+    "netdata_filename": "netdata.pkl"
+  },
+  "dashboard": {
+    "title": "交通信控系统",
+    "auto_refresh": false,
+    "refresh_interval": 5000,
+    "default_view": {
+      "show_edges": true,
+      "show_nodes": true,
+      "show_junctions": true,
+      "show_labels": false,
+      "show_congestion": true,
+      "line_width": 2,
+      "node_size": 6,
+      "enable_lane_filter": true,
+      "min_lanes": 2
+    }
+  },
+  "api": {
+    "enable_cors": true,
+    "max_history_size": 100
+  },
+  "tdengine": {
+    "host": "localhost",
+    "port": 6060
+  }
+}

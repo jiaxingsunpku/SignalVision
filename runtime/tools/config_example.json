@@ -1,0 +1,38 @@
+{
+    "_comment": "交通流量反演系统配置文件示例",
+    
+    "network_file": "data/raw_data/81/81.net.xml",
+    "flow_excel": "data/flow_data/detector_observations.xlsx",
+    
+    "output_dir": "output/flow_inversion",
+    "cache_dir": "cache/flow_inversion",
+    
+    "od_strategy": "balanced",
+    "max_od_pairs": 100,
+    
+    "route_calculation": {
+        "k_shortest_paths": 3,
+        "max_iterations": 100,
+        "convergence_threshold": 0.01
+    },
+    
+    "optimization": {
+        "enabled": true,
+        "method": "iterative",
+        "max_iterations": 50
+    },
+    
+    "visualization": {
+        "generate_plots": true,
+        "generate_html": true,
+        "plot_format": "png",
+        "dpi": 300
+    },
+    
+    "time_settings": {
+        "begin_time": 0,
+        "end_time": 3600,
+        "time_interval": 3600
+    }
+}
+

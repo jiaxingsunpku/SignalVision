@@ -1,0 +1,69 @@
+<div class="tool-panel" id="models-tool-panel">
+    <div class="tool-header">
+        <h2>🗂️ 模型管理</h2>
+        <div class="tool-header-info">
+            <span class="header-badge">训练日志</span>
+            <span class="header-text">浏览和管理训练模型</span>
+        </div>
+        <button class="close-btn" onclick="dashboard.closeTool()">×</button>
+    </div>
+    
+    <div class="tool-content models-content">
+        <!-- 左侧：模型列表 -->
+        <div class="models-sidebar">
+            <div class="models-filter">
+                <input type="text" id="model-search" placeholder="搜索模型..." class="search-input">
+                <select id="algorithm-filter" class="filter-select">
+                    <option value="">所有算法</option>
+                    <option value="ppo">PPO</option>
+                    <option value="maxpressure">MaxPressure</option>
+                </select>
+            </div>
+            
+            <div class="models-list" id="models-list">
+                <div class="loading-message">加载中...</div>
+            </div>
+        </div>
+        
+        <!-- 右侧：模型详情 -->
+        <div class="models-detail">
+            <div class="detail-placeholder" id="detail-placeholder">
+                <div class="placeholder-icon">📦</div>
+                <p>选择一个模型查看详情</p>
+            </div>
+            
+            <div class="detail-content" id="detail-content" style="display: none;">
+                <div class="detail-header">
+                    <h3 id="detail-title">模型名称</h3>
+                    <div class="detail-badges">
+                        <span class="badge badge-algorithm" id="detail-algorithm"></span>
+                        <span class="badge badge-status" id="detail-status"></span>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>📊 训练指标</h4>
+                    <div class="metrics-container">
+                        <img id="metrics-image" class="metrics-image" alt="训练指标图">
+                        <div class="metrics-error" id="metrics-error" style="display: none;">
+                            <p>无训练指标图</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>⚙️ 训练参数</h4>
+                    <div class="params-grid" id="params-grid">
+                        <div class="loading-message">加载中...</div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>📁 模型文件</h4>
+                    <div class="files-info" id="files-info"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
