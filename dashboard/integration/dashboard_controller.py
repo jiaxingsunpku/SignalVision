@@ -33,11 +33,6 @@ from adapter import (
 )
 
 from dashboard.integration.junction_agent import JunctionManager
-from dashboard.integration.anp_kafka import (
-    AnpProducer, AnpRegistrar, TOPIC_OBSERVATION, observation_envelope,
-)
-from dashboard.integration.anp_sensing import SvAnpTopology, aggregate_observations
-
 
 class DashboardController:
     """
@@ -79,14 +74,6 @@ class DashboardController:
         self.interface: Optional[StandardInterface] = None
         self.junction_manager = JunctionManager()
         
-        # ANP 接入（task5）：感知发布 producer + 方向归并拓扑（initialize() 后构建）
-        self.anp_producer = None
-        self.anp_topology = None
-        self.anp_registrar = None
-        self.anp_agent_prefix = os.environ.get("ANP_SV_PERCEPTION_PREFIX", "traffic-perception-sv-j")
-        self.anp_obs_seq = 0
-        self.anp_enabled = os.environ.get("ANP_SV_ENABLE", "1") != "0"
-
         # 状态标志
         self.is_initialized = False
         self.is_running = False
@@ -188,34 +175,6 @@ class DashboardController:
             network_data = self.interface.get_netdata()
             self.junction_manager.initialize_from_network_data(network_data)
             
-            # ANP 接入（task5）：构建方向归并拓扑 + 导出 phase 拓扑 + 起 producer（吞错降级）
-            if self.anp_enabled:
-                try:
-                    jm_ids = set(str(k) for k in self.junction_manager.junctions.keys())
-                    self.anp_topology = SvAnpTopology(self.simulation.world, junction_filter=jm_ids)
-                    written = self.anp_topology.write_json()
-                    self.anp_producer = AnpProducer()
-                    members = [self.anp_agent_prefix + str(iid) for iid in self.anp_topology.n_phases]
-                    # task5 路 A：每路口一个独立感知 agent，produces 通道 keys=路口 id → 前端按 key 定位真实路口
-                    junction_agents = [
-                        {"agent_id": self.anp_agent_prefix + str(iid), "agent_type": "signalvision",
-                         "capabilities": ["perception"],
-                         "produces": [{"topic": TOPIC_OBSERVATION, "keys": [str(iid)]}]}
-                        for iid in self.anp_topology.n_phases
-                    ]
-                    self.anp_registrar = AnpRegistrar(
-                        self.anp_producer, "traffic-perception-sv-host-001", "perception",
-                        ["perception"], members=members, junction_agents=junction_agents,
-                        metadata_provider=self._anp_sv_metadata)
-                    self.anp_registrar.start()
-                    print(f"[DashboardController][ANP] 拓扑就绪 {len(self.anp_topology.n_phases)} 路口；"
-                          f"phase 拓扑导出={written}；producer={'on' if self.anp_producer.available else 'off(降级)'}；"
-                          f"已注册 perception host + {len(members)} members")
-                except Exception as e:
-                    print(f"[DashboardController][ANP] 接入初始化失败（降级，不影响仿真）: {e}")
-                    self.anp_topology = None
-                    self.anp_producer = None
-
             self.is_initialized = True
             print(f"[DashboardController] 系统初始化完成 (共 {len(self.junction_manager.junctions)} 个路口)")
             
@@ -299,9 +258,6 @@ class DashboardController:
         
         self.current_step += 1
         
-        # ANP 感知发布（task5）：方向归并聚合 → 发 per-junction 观测（吞错降级）
-        self._publish_anp_observations()
-
         # 7. 返回当前状态
         return self.get_current_state()
     
@@ -363,51 +319,6 @@ class DashboardController:
             print(f"[_update_junction_agents] 开始计算 {len(self.junction_manager.junctions)} 个路口的指标")
         self.junction_manager.update_all_metrics()
     
-    def _publish_anp_observations(self):
-        """task5：把当前步 per-junction 方向级观测发到 ANP 观测 topic。吞错、不阻塞仿真。"""
-        if not self.anp_producer or not self.anp_topology:
-            return
-        try:
-            lane_data = self.interface.subscription_cache.get("lane_data", {})
-            by_junction = aggregate_observations(self.anp_topology, lane_data)
-            sim_time = self.simulation.current_time
-            sim_step = self.simulation.step_count
-            for iid, approaches in by_junction.items():
-                agent_id = self.anp_agent_prefix + str(iid)
-                env = observation_envelope(agent_id, str(iid), approaches, sim_time, sim_step,
-                                           sequence=self.anp_obs_seq)
-                self.anp_producer.publish(TOPIC_OBSERVATION, agent_id, env)
-            self.anp_obs_seq += 1
-        except Exception:
-            pass
-
-    def _anp_sv_metadata(self):
-        """task5 P-10：SV 仿真元信息（算法/步数/总步/运行状态），随 perception host 心跳上报供全局总览。"""
-        try:
-            total_steps = int(self.total_steps or 0)
-            sim_step = int(getattr(self, "current_step", 0) or 0)
-            if sim_step <= 0 and self.simulation is not None:
-                sim_step = int(getattr(self.simulation, "step_count", 0) or 0)
-            if total_steps > 0:
-                sim_step = min(sim_step, total_steps)
-            return {
-                "algorithm": str(getattr(self.args, "tsc", "") or ""),
-                "sim_step": sim_step,
-                "total_steps": total_steps,
-                "running": bool(self.is_running),
-            }
-        except Exception:
-            return {}
-
-    def _emit_anp_metadata_heartbeat(self, status="online"):
-        """立即刷新 ANP host metadata，避免全局总览卡保留上一帧运行态。"""
-        if not self.anp_registrar:
-            return
-        try:
-            self.anp_registrar.emit_heartbeat(status)
-        except Exception:
-            pass
-
     def _find_junction_for_lane(self, lane_id):
         """根据车道ID查找所属路口"""
         # 优化：使用缓存的映射关系
@@ -508,7 +419,6 @@ class DashboardController:
                 break
         
         self.is_running = False
-        self._emit_anp_metadata_heartbeat("online")
         print(f"[DashboardController] 仿真完成，总共执行了 {self.current_step} 步")
     
     def stop(self):
@@ -517,18 +427,7 @@ class DashboardController:
             if self.simulation:
                 self.simulation.close()
             self.is_running = False
-            self._emit_anp_metadata_heartbeat("offline")
             print("[DashboardController] 仿真已停止")
-        if self.anp_registrar:
-            try:
-                self.anp_registrar.stop()
-            except Exception:
-                pass
-        if self.anp_producer:
-            try:
-                self.anp_producer.flush()
-            except Exception:
-                pass
     
     def reset(self):
         """重置仿真状态"""

@@ -399,25 +399,6 @@ class LibSignalInterface(StandardInterface):
         sys.set_interface(self)
         print(f"[LibSignalInterface] 初始化完成: action_interval={self._action_interval}")
 
-        # ANP 控制层相位注入消费（task5）：订阅 control.phase 填槽，写灯口据此覆盖内置算法
-        self._anp_phase = None
-        self._anp_max_lag_steps = int(os.environ.get("ANP_MAX_LAG_STEPS", "30"))
-        self._anp_max_age_sec = float(os.environ.get("ANP_MAX_AGE_SEC", "12"))  # 世界时钟 v1：挂钟新鲜度上限(秒)
-        self._anp_injected = 0
-        self._anp_fallback = 0
-        if os.environ.get("ANP_SV_ENABLE", "1") != "0":
-            try:
-                from dashboard.integration.anp_kafka import AnpPhaseConsumer
-                self._anp_phase = AnpPhaseConsumer()
-                self._anp_phase.start()
-                print("[LibSignalInterface][ANP] 相位注入消费 = "
-                      + ("on" if self._anp_phase.available else "off(降级)")
-                      + "; max_age_sec=" + str(self._anp_max_age_sec)
-                      + " max_lag_steps=" + str(self._anp_max_lag_steps))
-            except Exception as e:
-                print("[LibSignalInterface][ANP] 相位消费初始化失败（降级）: " + str(e))
-                self._anp_phase = None
-
     def _collect_actions(self):
         if not self.sim.agents:
             return []
@@ -453,48 +434,12 @@ class LibSignalInterface(StandardInterface):
                     for idx, action in enumerate(all_actions):
                         if idx < len(self.sim.world.intersections):
                             inter = self.sim.world.intersections[idx]
-                            action = self._anp_override_action(inter, action)  # task5：外部相位覆盖
                             inter.pseudo_step(int(action))
 
             self.sim.signal_complete = True
         except Exception:
             self.sim.signal_complete = True
             raise
-
-    def _anp_override_action(self, inter, builtin_action):
-        """task5/世界时钟 v1：有未过期外部相位则覆盖内置 action；过期/非法/缺失回落内置（A3/A4）。
-
-        过期判据统一用**挂钟新鲜度**（``based_on_event_ts``）：``age=now−event_ts>max_age`` → 回落,
-        统一 SUMO/视频等多源(真实源无 sim_step、只走挂钟)。SUMO 源叠加 ``sim_step`` lag 旁路
-        (ANP_MAX_LAG_STEPS>0 时,防仿真加速下注入仿真上已过时的相位)。
-        """
-        if self._anp_phase is None:
-            return builtin_action
-        latest = self._anp_phase.get_latest(inter.id)
-        if latest is None:
-            return builtin_action
-        phase_index, based_on_sim_step, based_on_event_ts, _recv = latest
-        # 主判据：挂钟新鲜度(世界时钟 v1)。带 based_on_event_ts 则据此判;否则回落 sim_step(兼容旧消息)。
-        from dashboard.integration.anp_kafka import wall_age_seconds
-        if based_on_event_ts is not None:
-            age = wall_age_seconds(based_on_event_ts)
-            if age is None or age > self._anp_max_age_sec:
-                self._anp_fallback += 1
-                return builtin_action
-        elif based_on_sim_step is None:
-            self._anp_fallback += 1  # 两个时间基都缺失 → 保守回落
-            return builtin_action
-        # SUMO 源附加旁路:sim_step 落后过多也回落(ANP_MAX_LAG_STEPS>0 启用;真实源不带 sim_step 则跳过)
-        if self._anp_max_lag_steps > 0 and based_on_sim_step is not None:
-            if self.sim.step_count - based_on_sim_step > self._anp_max_lag_steps:
-                self._anp_fallback += 1
-                return builtin_action
-        # 合法性：phase_index ∈ [0, n_phases-1]（SV 写灯口本地 Safety Guard）
-        if not (0 <= phase_index < len(inter.phases)):
-            self._anp_fallback += 1
-            return builtin_action
-        self._anp_injected += 1
-        return phase_index
 
     def get_netdata(self) -> Dict[str, Any]:
         if not self.sim.world:

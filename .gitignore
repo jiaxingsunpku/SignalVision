@@ -36,7 +36,6 @@ phases/
 cache/
 dashboard/cache/
 dashboard/experiments/
-dashboard/integration/.anp_topology.json
 runtime/output/
 runtime/log/
 runtime/cache/

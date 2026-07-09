@@ -335,7 +335,7 @@ class SimulationManager:
         runtime_dir = self.project_root / 'runtime'
         
         # 演示环境可能没有安装 SUMO；此时启动轻量回放进程，保持 Dashboard
-        # status/current_time 可观测，ANP 命令链路仍走真实 HTTP/Kafka 闭环。
+        # status/current_time 可观测。
         if shutil.which('sumo') is None:
             total_steps = int(kwargs.get('simlen') or self.sim_config.DEFAULT_ARGS.get('simlen', 3600))
             replay_code = (
