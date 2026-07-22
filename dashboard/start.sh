@@ -87,12 +87,38 @@ else
 fi
 echo ""
 
-# ANP: conda activate 不会自动设 SUMO_HOME → libsumo/traci 需要它(否则 No SUMO in environment path,
-# 集成模式 DashboardController 起 SUMO 会秒退)。显式指向 traffic env 的 SUMO 安装目录。
+# conda activate 不一定自动设置 SUMO_HOME；优先从当前 Conda 环境发现，
+# 否则使用系统安装的 sumo / sumo-gui，避免写死开发机路径。
 if [[ -z "$SUMO_HOME" ]]; then
-    export SUMO_HOME="/home/sjx/miniconda3/envs/traffic/lib/python3.8/site-packages/sumo"
+    if [[ -n "$CONDA_PREFIX" && -d "$CONDA_PREFIX/share/sumo" ]]; then
+        export SUMO_HOME="$CONDA_PREFIX/share/sumo"
+    elif [[ -n "$CONDA_PREFIX" && -d "$CONDA_PREFIX/lib/python3.8/site-packages/sumo" ]]; then
+        export SUMO_HOME="$CONDA_PREFIX/lib/python3.8/site-packages/sumo"
+    elif command -v sumo &> /dev/null; then
+        SUMO_BIN_DIR="$(dirname "$(command -v sumo)")"
+        SUMO_PREFIX="$(cd "$SUMO_BIN_DIR/.." && pwd)"
+        [[ -d "$SUMO_PREFIX/share/sumo" ]] && export SUMO_HOME="$SUMO_PREFIX/share/sumo"
+    fi
+fi
+if [[ -n "$SUMO_HOME" ]]; then
     export PATH="$SUMO_HOME/bin:$PATH"
     echo "✓ SUMO_HOME=$SUMO_HOME"
+else
+    echo "警告: 未自动发现 SUMO_HOME；请在启动前手动设置"
+fi
+
+# 后台启动 Dashboard 时通常不会继承桌面会话的 X11 授权；sumo-gui 需要
+# DISPLAY/XAUTHORITY。GNOME Wayland 下 SUMO-GUI 通过 Xwayland 显示。
+if [[ -z "$DISPLAY" && -S "/tmp/.X11-unix/X0" ]]; then
+    export DISPLAY=":0"
+    echo "✓ DISPLAY=$DISPLAY"
+fi
+if [[ -z "$XAUTHORITY" ]]; then
+    XAUTH_CANDIDATE="$(ls -t "/run/user/$(id -u)"/.mutter-Xwaylandauth.* 2>/dev/null | head -n 1)"
+    if [[ -n "$XAUTH_CANDIDATE" ]]; then
+        export XAUTHORITY="$XAUTH_CANDIDATE"
+        echo "✓ XAUTHORITY=$XAUTHORITY"
+    fi
 fi
 
 # 检查Python

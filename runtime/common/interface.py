@@ -41,8 +41,18 @@ class World_param_Interface(Interface):
     def __init__(self, config):
         super(World_param_Interface, self).__init__()
         path = os.path.join(os.getcwd(), 'configs/sim', config['command']['network'] + '.cfg')
-        other_world_settings = modify_config_file(path, config)
-        World_param_Interface.param = load_config_dict(path, other_world_settings)
+        if config['command']['world'] == 'sumo':
+            # Dashboard 会按每次启动选择 GUI/libsumo，只应修改本次运行参数。
+            # 旧逻辑会把 gui 回写到 configs/sim/*.cfg，导致下次运行和 Git 工作区被污染。
+            world_settings = load_config_dict(path)
+            world_settings.update({
+                key: value for key, value in config['world'].items()
+                if value is not None
+            })
+            World_param_Interface.param = world_settings
+        else:
+            other_world_settings = modify_config_file(path, config)
+            World_param_Interface.param = load_config_dict(path, other_world_settings)
         
 
 @Registry.register_model('setting')

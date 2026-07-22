@@ -372,6 +372,7 @@ class DashboardController:
             'current_step': self.current_step,
             'total_steps': self.total_steps,
             'simulation_time': sim_time,
+            'traffic_metrics': dict(getattr(self.simulation, 'traffic_metrics', {}) or {}),
             'junctions': self.junction_manager.get_all_summaries()
         }
     
@@ -419,13 +420,15 @@ class DashboardController:
                 break
         
         self.is_running = False
+        if self.simulation:
+            self.simulation.close()
         print(f"[DashboardController] 仿真完成，总共执行了 {self.current_step} 步")
     
     def stop(self):
         """停止仿真"""
+        if self.simulation:
+            self.simulation.close()
         if self.is_running:
-            if self.simulation:
-                self.simulation.close()
             self.is_running = False
             print("[DashboardController] 仿真已停止")
     

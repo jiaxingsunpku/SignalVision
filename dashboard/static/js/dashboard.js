@@ -414,8 +414,12 @@ class Dashboard {
             if (mapResponse.ok) {
                 const mapData = await mapResponse.json();
                 if (mapData.success && mapData.maps) {
-                    const mapSelect = document.getElementById('sumo-map');
-                    if (mapSelect) {
+                    [
+                        ['sumo-map', 'sumo-traffic-profile'],
+                        ['comparison-map', 'comparison-traffic-profile']
+                    ].forEach(([mapSelectId, trafficSelectId]) => {
+                        const mapSelect = document.getElementById(mapSelectId);
+                        if (!mapSelect) return;
                         mapSelect.innerHTML = '';
                         mapData.maps.forEach(map => {
                             const option = document.createElement('option');
@@ -427,15 +431,28 @@ class Dashboard {
                             mapSelect.appendChild(option);
                         });
 
-                        mapSelect.onchange = () => {
-                            const mapSpan = document.getElementById('current-sim-map');
-                            if (mapSpan) {
-                                mapSpan.textContent = mapSelect.value || data.current_map;
+                        mapSelect.onchange = async () => {
+                            if (mapSelectId === 'sumo-map') {
+                                const mapSpan = document.getElementById('current-sim-map');
+                                if (mapSpan) {
+                                    mapSpan.textContent = mapSelect.value || data.current_map;
+                                }
                             }
+                            await this.loadTrafficProfiles(
+                                mapSelect.value || data.current_map,
+                                trafficSelectId
+                            );
                         };
-                    }
+                    });
                 }
             }
+
+            const selectedMap = document.getElementById('sumo-map')?.value || data.current_map;
+            const comparisonMap = document.getElementById('comparison-map')?.value || data.current_map;
+            await Promise.all([
+                this.loadTrafficProfiles(selectedMap, 'sumo-traffic-profile'),
+                this.loadTrafficProfiles(comparisonMap, 'comparison-traffic-profile')
+            ]);
             
             // 动态填充预设下拉菜单
             if (data.presets && data.presets.length > 0) {
@@ -453,6 +470,13 @@ class Dashboard {
                         select.appendChild(option);
                         console.log('[Dashboard] 添加选项:', preset.name, '-', preset.description);
                     });
+
+                    // 默认使用 MaxPressure + SUMO-GUI；旧后端缺少 GUI 预设时安全降级。
+                    const defaultPreset = data.presets.some(preset => preset.name === 'maxpressure_gui')
+                        ? 'maxpressure_gui'
+                        : (data.presets.some(preset => preset.name === 'maxpressure') ? 'maxpressure' : data.presets[0].name);
+                    select.value = defaultPreset;
+                    console.log('[Dashboard] 默认仿真预设:', defaultPreset);
                     
                     console.log('[Dashboard] 预设加载完成，共', data.presets.length, '个选项');
                 } else {
@@ -461,8 +485,43 @@ class Dashboard {
             } else {
                 console.warn('[Dashboard] 预设数据为空或格式错误');
             }
+            await this.syncRealtimeComparisonControls();
         } catch (error) {
             console.error('[Dashboard] 加载仿真预设失败:', error);
+        }
+    }
+
+    async loadTrafficProfiles(simName, selectId = 'sumo-traffic-profile') {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+
+        select.innerHTML = '<option value="">加载车流中...</option>';
+        select.disabled = true;
+        try {
+            const response = await fetch(`/api/simulation/traffic-profiles?sim_name=${encodeURIComponent(simName || '')}`);
+            const result = await response.json();
+            if (!response.ok || !result.success || !Array.isArray(result.profiles)) {
+                throw new Error(result.message || '车流方案加载失败');
+            }
+
+            select.innerHTML = '';
+            result.profiles.forEach(profile => {
+                const option = document.createElement('option');
+                option.value = profile.id;
+                option.textContent = profile.name;
+                option.title = profile.description || profile.name;
+                option.disabled = profile.available === false;
+                option.selected = !!profile.default;
+                select.appendChild(option);
+            });
+            if (!select.value && result.profiles.length) {
+                select.value = result.profiles[0].id;
+            }
+            select.disabled = false;
+        } catch (error) {
+            console.error('[Dashboard] 加载车流方案失败:', error);
+            select.innerHTML = '<option value="default">场景默认车流</option>';
+            select.disabled = false;
         }
     }
 
@@ -479,8 +538,11 @@ class Dashboard {
     async startSumoSimulation() {
         const mapSelect = document.getElementById('sumo-map');
         const configSelect = document.getElementById('sumo-config');
+        const trafficSelect = document.getElementById('sumo-traffic-profile');
         const simName = mapSelect ? mapSelect.value : undefined;
         const config = configSelect.value;
+        const trafficProfile = trafficSelect ? trafficSelect.value : 'default';
+        const trafficLabel = trafficSelect?.selectedOptions?.[0]?.textContent || trafficProfile;
         const startBtn = document.getElementById('start-sumo-btn');
         
         // 禁用按钮
@@ -496,6 +558,7 @@ class Dashboard {
         if (simName) {
             this.addLog('info', `使用地图: ${simName}`);
         }
+        this.addLog('info', `使用车流: ${trafficLabel}`);
         
         try {
             const response = await fetch('/api/simulation/start', {
@@ -503,7 +566,11 @@ class Dashboard {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ config: config, sim_name: simName })
+                body: JSON.stringify({
+                    config: config,
+                    sim_name: simName,
+                    traffic_profile: trafficProfile
+                })
             });
             
             const data = await response.json();
@@ -511,7 +578,7 @@ class Dashboard {
             if (data.success) {
                 this.addLog('success', '仿真启动成功！');
                 this.addLog('info', `进程ID: ${data.pid}`);
-                this.updateConnectionStatus('running', 'SUMO仿真运行中', `配置: ${config}`);
+                this.updateConnectionStatus('running', 'SUMO仿真运行中', `配置: ${config} · 车流: ${trafficLabel}`);
                 
                 // 隐藏启动按钮，显示停止按钮
                 startBtn.style.display = 'none';
@@ -529,6 +596,114 @@ class Dashboard {
             startBtn.disabled = false;
             startBtn.textContent = '启动仿真';
         }
+    }
+
+    async syncRealtimeComparisonControls() {
+        const startBtn = document.getElementById('start-comparison-btn');
+        const stopBtn = document.getElementById('stop-comparison-btn');
+        if (!startBtn || !stopBtn) return;
+        try {
+            const response = await fetch('/api/comparison/realtime/status', { cache: 'no-store' });
+            const result = await response.json();
+            startBtn.style.display = result.running ? 'none' : 'block';
+            stopBtn.style.display = result.running ? 'block' : 'none';
+        } catch (error) {
+            console.debug('[Dashboard] 对比实验状态读取失败:', error);
+        }
+    }
+
+    async startRealtimeComparison() {
+        const mapSelect = document.getElementById('comparison-map');
+        const trafficSelect = document.getElementById('comparison-traffic-profile');
+        const guiEnabled = document.getElementById('comparison-gui-enabled')?.checked !== false;
+        const startBtn = document.getElementById('start-comparison-btn');
+        const simName = mapSelect?.value;
+        const trafficProfile = trafficSelect?.value || 'default';
+        const trafficLabel = trafficSelect?.selectedOptions?.[0]?.textContent || trafficProfile;
+
+        startBtn.disabled = true;
+        startBtn.textContent = '启动对比中...';
+        this.addLog('info', `准备同时启动 FixedTime 与 PPO · 地图: ${simName} · 车流: ${trafficLabel}`);
+        this.addLog(
+            'info',
+            guiEnabled
+                ? '将打开两个独立且自动运行的 SUMO-GUI 窗口'
+                : 'SUMO-GUI 已关闭，将仅在 Dashboard 查看实时对比'
+        );
+        try {
+            const response = await fetch('/api/comparison/realtime/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sim_name: simName,
+                    traffic_profile: trafficProfile,
+                    simlen: 3600,
+                    gui: guiEnabled
+                })
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || '对比实验启动失败');
+            }
+            this.addLog('success', 'FixedTime 与 PPO 已在两个隔离进程中启动');
+            this.addLog('info', '打开“实时交通数据”可查看上下对比曲线');
+            this.updateConnectionStatus('running', '对比实验运行中', `FixedTime vs PPO · ${trafficLabel}`);
+            await this.syncRealtimeComparisonControls();
+        } catch (error) {
+            this.addLog('error', `对比实验启动失败: ${error.message}`);
+        } finally {
+            startBtn.disabled = false;
+            startBtn.textContent = '启动对比试验';
+        }
+    }
+
+    async stopRealtimeComparison() {
+        this.addLog('info', '正在停止 FixedTime 与 PPO 对比实验...');
+        try {
+            const response = await fetch('/api/comparison/realtime/stop', { method: 'POST' });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || '停止失败');
+            }
+            this.addLog('success', '对比实验已停止');
+            this.updateConnectionStatus('connected', '服务已连接', '对比实验已停止');
+            await this.syncRealtimeComparisonControls();
+        } catch (error) {
+            this.addLog('error', `停止对比失败: ${error.message}`);
+        }
+    }
+
+    async toggleRealtimeComparisonPause() {
+        const button = document.getElementById('comparison-pause-btn');
+        const action = this.realtimeComparisonPaused ? 'resume' : 'pause';
+        if (button) button.disabled = true;
+        try {
+            const response = await fetch(`/api/comparison/realtime/${action}`, { method: 'POST' });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || '控制失败');
+            }
+            this.realtimeComparisonPaused = !!result.paused;
+            this.addLog('info', result.message);
+            await this.refreshRealtimeTrafficData();
+        } catch (error) {
+            this.addLog('error', `对比实验控制失败: ${error.message}`);
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async terminateRealtimeComparison() {
+        const button = document.getElementById('comparison-terminate-btn');
+        if (button) {
+            button.disabled = true;
+            button.textContent = '正在终止...';
+        }
+        await this.stopRealtimeComparison();
+        await Promise.all([
+            this.refreshRealtimeTrafficData(),
+            this.loadComparisonHistory()
+        ]);
     }
 
     /**
@@ -951,19 +1126,19 @@ class Dashboard {
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">活跃路口</div>
-                        <div class="stat-value" style="color: #00ff88;" id="stat-active-junctions">0</div>
+                        <div class="stat-value" style="color: var(--success-color);" id="stat-active-junctions">0</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">总车辆数</div>
-                        <div class="stat-value" style="color: #00ff88;" id="stat-total-vehicles">0</div>
+                        <div class="stat-value" style="color: var(--success-color);" id="stat-total-vehicles">0</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">平均速度</div>
-                        <div class="stat-value" style="color: #00ff88;" id="stat-avg-speed">0 km/h</div>
+                        <div class="stat-value" style="color: var(--success-color);" id="stat-avg-speed">0 km/h</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">等待车辆</div>
-                        <div class="stat-value" style="color: #ff6b6b;" id="stat-total-waiting">0</div>
+                        <div class="stat-value" style="color: var(--error-color);" id="stat-total-waiting">0</div>
                     </div>
                 </div>
             `;
@@ -1276,19 +1451,11 @@ Dashboard.prototype.fetchAgentDetail = async function(junctionId) {
  */
 Dashboard.prototype.openDataTool = async function() {
     try {
-        // 获取TDengine配置
-        const response = await fetch(`${this.apiBaseUrl}/tools/data/tdengine-config`);
-        const result = await response.json();
-        
-        if (!result.success) {
-            alert('无法获取TDengine配置: ' + result.message);
-            return;
-        }
-        
-        const config = result.config;
-        
         // 加载工具面板HTML
         const htmlResponse = await fetch('/static/html/realtime-traffic-data-tool.html');
+        if (!htmlResponse.ok) {
+            throw new Error(`实时交通数据面板加载失败: ${htmlResponse.status}`);
+        }
         const html = await htmlResponse.text();
         
         // 创建或获取工具容器
@@ -1302,51 +1469,779 @@ Dashboard.prototype.openDataTool = async function() {
         // 插入HTML
         toolContainer.innerHTML = html;
         toolContainer.style.display = 'block';  // 确保容器可见
-        const panel = document.getElementById('data-tool-panel');
+        const panel = document.getElementById('realtime-traffic-data-tool-panel') || document.getElementById('data-tool-panel');
+        if (!panel) {
+            throw new Error('实时交通数据面板 DOM 未加载');
+        }
         panel.classList.add('active');
         panel.style.display = 'block';  // 确保面板可见
-        
-        // 显示TDengine URL
-        const urlElement = document.getElementById('tdengine-url');
-        if (urlElement) {
-            urlElement.textContent = config.url;
+
+        if (this.dataToolTimer) {
+            clearInterval(this.dataToolTimer);
+            this.dataToolTimer = null;
         }
-        
-        // 设置iframe src，使用TDengine Web界面
-        const iframe = document.getElementById('tdengine-iframe');
-        iframe.src = config.url;
-        
-        // iframe加载完成后隐藏加载提示
-        iframe.onload = function() {
-            iframe.classList.add('loaded');
-            const loadingInfo = document.getElementById('tdengine-loading');
-            if (loadingInfo) {
-                loadingInfo.style.opacity = '0';
-                setTimeout(() => {
-                    loadingInfo.style.display = 'none';
-                }, 300);
+
+        this.realtimeHistory = [];
+        this.realtimeHistorySession = null;
+        this.comparisonRealtimeHistory = { fixedtime: [], ppo: [] };
+        this.comparisonRealtimeSession = null;
+        await Promise.all([
+            this.refreshRealtimeTrafficData(),
+            this.loadComparisonHistory()
+        ]);
+        this.dataToolTimer = setInterval(() => {
+            const currentPanel = document.getElementById('realtime-traffic-data-tool-panel');
+            if (currentPanel && currentPanel.classList.contains('active')) {
+                this.refreshRealtimeTrafficData();
             }
-        };
-        
-        // 超时处理
-        setTimeout(() => {
-            if (!iframe.classList.contains('loaded')) {
-                const loadingInfo = document.getElementById('tdengine-loading');
-                if (loadingInfo) {
-                    loadingInfo.innerHTML = `
-                        <div class="loading-spinner">⚠️</div>
-                        <p style="color: var(--warning-color);">连接超时</p>
-                        <p class="info-text">请检查 TDengine 服务是否运行</p>
-                        <p class="info-text">地址: ${config.url}</p>
-                    `;
-                }
-            }
-        }, 10000);
+        }, 3000);
         
     } catch (error) {
         console.error('打开实时交通数据工具失败:', error);
         alert('打开实时交通数据工具失败: ' + error.message);
     }
+};
+
+Dashboard.prototype.refreshRealtimeTrafficData = async function() {
+    if (!document.getElementById('realtime-data-body')) return;
+
+    try {
+        const comparisonResponse = await fetch('/api/comparison/realtime/status', { cache: 'no-store' });
+        if (comparisonResponse.ok) {
+            const comparison = await comparisonResponse.json();
+            const hasComparison = comparison.success
+                && comparison.config
+                && Array.isArray(comparison.experiments)
+                && comparison.experiments.some(item => item.running || this.asFiniteNumber(item.step, 0) > 0);
+            if (hasComparison) {
+                await this.ensureRealtimeComparisonHistory(comparison);
+                this.renderRealtimeComparison(comparison);
+                return;
+            }
+        }
+
+        const comparisonBoard = document.getElementById('realtime-comparison-board');
+        const singleView = document.getElementById('realtime-single-view');
+        if (comparisonBoard) comparisonBoard.style.display = 'none';
+        if (singleView) singleView.style.display = 'flex';
+
+        const response = await fetch(`${this.apiBaseUrl}/simulation/realtime`, { cache: 'no-store' });
+        const realtime = await response.json();
+
+        if (response.ok && realtime && realtime.success && Array.isArray(realtime.junctions)) {
+            this.renderRealtimeTrafficData({
+                source: 'simulation',
+                sourceLabel: realtime.simulation && realtime.simulation.running ? '仿真运行中' : '实时数据',
+                simulation: realtime.simulation || {},
+                statistics: this.normalizeRealtimeTrafficStats(realtime.statistics, realtime.junctions),
+                junctions: realtime.junctions
+            });
+            return;
+        }
+
+        const fallbackPayload = await this.fetchRealtimeTrafficSummary(realtime && realtime.message);
+        this.renderRealtimeTrafficData(fallbackPayload);
+    } catch (error) {
+        console.error('[Dashboard] 刷新实时交通数据失败:', error);
+        try {
+            const fallbackPayload = await this.fetchRealtimeTrafficSummary(error.message);
+            this.renderRealtimeTrafficData(fallbackPayload);
+        } catch (fallbackError) {
+            this.renderRealtimeTrafficError(fallbackError.message || error.message);
+        }
+    }
+};
+
+Dashboard.prototype.getRealtimeComparisonSessionKey = function(comparison) {
+    const config = comparison?.config || {};
+    return config.session_id || JSON.stringify(config);
+};
+
+Dashboard.prototype.normalizeComparisonHistoryPoint = function(snapshot) {
+    const stats = snapshot?.statistics || {};
+    return {
+        step: this.asFiniteNumber(snapshot?.step, 0),
+        active: this.asFiniteNumber(stats.active_vehicles, stats.total_vehicles),
+        waiting: this.asFiniteNumber(stats.total_waiting, 0),
+        departedTotal: this.asFiniteNumber(stats.departed_total, 0),
+        arrivedTotal: this.asFiniteNumber(stats.arrived_total, 0)
+    };
+};
+
+Dashboard.prototype.ensureRealtimeComparisonHistory = async function(comparison) {
+    const sessionKey = this.getRealtimeComparisonSessionKey(comparison);
+    if (this.comparisonRealtimeSession === sessionKey) return;
+    if (this.comparisonRealtimeHydrationKey === sessionKey && this.comparisonRealtimeHydrationPromise) {
+        await this.comparisonRealtimeHydrationPromise;
+        return;
+    }
+
+    this.comparisonRealtimeHydrationKey = sessionKey;
+    this.comparisonRealtimeHydrationPromise = (async () => {
+        const response = await fetch('/api/comparison/realtime/history?max_points=600', { cache: 'no-store' });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || '对比曲线历史读取失败');
+        const expectedSessionId = comparison?.config?.session_id;
+        if (expectedSessionId && result.session_id && expectedSessionId !== result.session_id) return;
+
+        const hydrated = { fixedtime: [], ppo: [] };
+        (result.experiments || []).forEach(experiment => {
+            const experimentId = experiment.experiment_id;
+            if (!Object.prototype.hasOwnProperty.call(hydrated, experimentId)) return;
+            hydrated[experimentId] = (experiment.series || [])
+                .map(snapshot => this.normalizeComparisonHistoryPoint(snapshot))
+                .filter(point => point.step > 0);
+        });
+        this.comparisonRealtimeHistory = hydrated;
+        this.comparisonRealtimeSession = sessionKey;
+    })();
+    try {
+        await this.comparisonRealtimeHydrationPromise;
+    } catch (error) {
+        console.warn('[Dashboard] 回填对比试验历史曲线失败，将从当前步骤继续:', error);
+        this.comparisonRealtimeHistory = { fixedtime: [], ppo: [] };
+        this.comparisonRealtimeSession = sessionKey;
+    } finally {
+        this.comparisonRealtimeHydrationKey = null;
+        this.comparisonRealtimeHydrationPromise = null;
+    }
+};
+
+Dashboard.prototype.compactRealtimeComparisonHistory = function(history, maxPoints = 600) {
+    if (history.length <= maxPoints) return history;
+    const lastIndex = history.length - 1;
+    const indices = new Set();
+    for (let index = 0; index < maxPoints; index += 1) {
+        indices.add(Math.round(index * lastIndex / (maxPoints - 1)));
+    }
+    return Array.from(indices).sort((a, b) => a - b).map(index => history[index]);
+};
+
+Dashboard.prototype.renderRealtimeComparison = function(comparison) {
+    const board = document.getElementById('realtime-comparison-board');
+    const singleView = document.getElementById('realtime-single-view');
+    if (!board) return;
+    board.style.display = 'flex';
+    if (singleView) singleView.style.display = 'none';
+
+    const sessionKey = this.getRealtimeComparisonSessionKey(comparison);
+    if (!this.comparisonRealtimeHistory || this.comparisonRealtimeSession !== sessionKey) {
+        this.comparisonRealtimeHistory = { fixedtime: [], ppo: [] };
+        this.comparisonRealtimeSession = sessionKey;
+    }
+
+    const status = document.getElementById('comparison-data-status');
+    this.realtimeComparisonPaused = !!comparison.paused;
+    if (status) {
+        status.textContent = comparison.paused
+            ? '双实验已暂停'
+            : (comparison.running ? '双实验运行中' : '实验已结束');
+        status.className = `realtime-status-pill ${comparison.running && !comparison.paused ? 'running' : 'fallback'}`;
+    }
+
+    const pauseButton = document.getElementById('comparison-pause-btn');
+    const terminateButton = document.getElementById('comparison-terminate-btn');
+    if (pauseButton) {
+        pauseButton.disabled = !comparison.running;
+        pauseButton.textContent = comparison.paused ? '▶ 继续试验' : '⏸ 暂停试验';
+    }
+    if (terminateButton) {
+        terminateButton.disabled = !comparison.running;
+        terminateButton.textContent = comparison.running ? '■ 终止试验' : '实验已结束';
+    }
+
+    (comparison.experiments || []).forEach(experiment => {
+        const experimentId = experiment.experiment_id;
+        if (!['fixedtime', 'ppo'].includes(experimentId)) return;
+        const stats = experiment.statistics || {};
+        const step = this.asFiniteNumber(experiment.step, 0);
+        let history = this.comparisonRealtimeHistory[experimentId] || [];
+        const latest = history[history.length - 1];
+        if (latest && step < latest.step) history = [];
+
+        const point = this.normalizeComparisonHistoryPoint({ step, statistics: stats });
+        if (step > 0) {
+            const current = history[history.length - 1];
+            if (current && current.step === step) history[history.length - 1] = point;
+            else history.push(point);
+            history = this.compactRealtimeComparisonHistory(history, 600);
+        }
+        this.comparisonRealtimeHistory[experimentId] = history;
+
+        const setText = (suffix, value) => {
+            const element = document.getElementById(`comparison-${experimentId}-${suffix}`);
+            if (element) element.textContent = value;
+        };
+        const stateLabel = experiment.error
+            ? `失败: ${experiment.error}`
+            : (experiment.running ? `第 ${Math.round(step)} / ${experiment.total_steps || '--'} 步` : `已完成 ${Math.round(step)} 步`);
+        setText('step', stateLabel);
+        setText('active', Math.round(point.active));
+        setText('waiting', Math.round(point.waiting));
+        setText('arrived', Math.round(point.arrivedTotal));
+        setText('congestion', `${Math.round(this.asFiniteNumber(stats.avg_congestion, 0) * 100)}%`);
+
+        this.drawRealtimeLineChart(`comparison-${experimentId}-load-chart`, history, [
+            { key: 'active', label: '在途车辆', color: '#5dd7ff' },
+            { key: 'waiting', label: '排队车辆', color: '#ffb454' }
+        ]);
+        this.drawRealtimeLineChart(`comparison-${experimentId}-throughput-chart`, history, [
+            { key: 'departedTotal', label: '累计驶入', color: '#8b7cff' },
+            { key: 'arrivedTotal', label: '累计驶出', color: '#2ee59d' }
+        ]);
+    });
+};
+
+Dashboard.prototype.loadComparisonHistory = async function() {
+    const body = document.getElementById('comparison-history-body');
+    if (!body) return;
+    body.innerHTML = '<tr><td colspan="8">正在加载历史记录...</td></tr>';
+    try {
+        const response = await fetch('/api/comparison/history?limit=1000', { cache: 'no-store' });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.message || '历史记录读取失败');
+        }
+        this.comparisonHistoryRecords = Array.isArray(result.records) ? result.records : [];
+        this.applyComparisonHistoryFilters();
+    } catch (error) {
+        body.innerHTML = `<tr><td colspan="8" class="comparison-history-empty">加载失败：${this.escapeHtml(error.message)}</td></tr>`;
+    }
+};
+
+Dashboard.prototype.getComparisonHistoryActualSteps = function(record) {
+    return Math.max(
+        0,
+        ...(record.experiments || []).map(item => this.asFiniteNumber(item.summary?.steps, 0))
+    );
+};
+
+Dashboard.prototype.renderComparisonHistory = function(records) {
+    const body = document.getElementById('comparison-history-body');
+    if (!body) return;
+    const allRecords = Array.isArray(this.comparisonHistoryRecords) ? this.comparisonHistoryRecords : [];
+    const visibleRecords = Array.isArray(records) ? records : allRecords;
+    const summary = document.getElementById('comparison-history-filter-summary');
+    if (summary) summary.textContent = `显示 ${visibleRecords.length} / ${allRecords.length} 条记录`;
+    if (!visibleRecords.length) {
+        body.innerHTML = `<tr><td colspan="8" class="comparison-history-empty">${
+            allRecords.length ? '没有符合当前条件的历史试验' : '暂无历史记录，完成或终止一次对比试验后会自动保存'
+        }</td></tr>`;
+        return;
+    }
+
+    const number = value => this.asFiniteNumber(value, 0);
+    body.innerHTML = visibleRecords.map(record => {
+            const config = record.config || {};
+            const traffic = config.traffic || {};
+            const fixed = (record.experiments || []).find(item => item.experiment_id === 'fixedtime')?.summary || {};
+            const ppo = (record.experiments || []).find(item => item.experiment_id === 'ppo')?.summary || {};
+            const fixedWaiting = number(fixed.mean_waiting);
+            const ppoWaiting = number(ppo.mean_waiting);
+            const improvement = fixedWaiting > 0 ? (fixedWaiting - ppoWaiting) / fixedWaiting * 100 : 0;
+            const improvementClass = improvement > 0.05 ? 'positive' : (improvement < -0.05 ? 'negative' : 'neutral');
+            const createdAt = record.created_at ? new Date(record.created_at).toLocaleString('zh-CN', { hour12: false }) : '--';
+            return `
+                <tr>
+                    <td>${this.escapeHtml(createdAt)}</td>
+                    <td>
+                        <strong>${this.escapeHtml(config.sim_name || '--')}</strong>
+                        <small>${this.escapeHtml(traffic.name || config.traffic_profile || '--')}</small>
+                    </td>
+                    <td>${config.simlen || '--'} 步 · ${config.gui ? '双 GUI' : '无 GUI'}</td>
+                    <td>${fixedWaiting.toFixed(1)} <small>峰值 ${Math.round(number(fixed.peak_waiting))}</small></td>
+                    <td>${ppoWaiting.toFixed(1)} <small>峰值 ${Math.round(number(ppo.peak_waiting))}</small></td>
+                    <td><span class="history-improvement ${improvementClass}">${improvement >= 0 ? '+' : ''}${improvement.toFixed(1)}%</span></td>
+                    <td>${Math.round(number(fixed.arrived_total))} / ${Math.round(number(ppo.arrived_total))}</td>
+                    <td>
+                        <div class="history-row-actions">
+                            <button class="history-detail-btn" type="button" data-session-id="${this.escapeHtml(record.session_id || '')}">查看曲线</button>
+                            <button class="history-delete-btn" type="button" data-session-id="${this.escapeHtml(record.session_id || '')}">删除</button>
+                        </div>
+                    </td>
+                </tr>`;
+        }).join('');
+    body.querySelectorAll('.history-detail-btn').forEach(button => {
+        button.addEventListener('click', () => this.viewComparisonHistory(button.dataset.sessionId));
+    });
+    body.querySelectorAll('.history-delete-btn').forEach(button => {
+        button.addEventListener('click', () => this.deleteComparisonHistory(button.dataset.sessionId));
+    });
+};
+
+Dashboard.prototype.applyComparisonHistoryFilters = function() {
+    const dateValue = document.getElementById('comparison-history-date-filter')?.value || '';
+    const stepsRaw = document.getElementById('comparison-history-steps-filter')?.value || '';
+    const minimumSteps = stepsRaw ? Number(stepsRaw) : 0;
+    const records = (this.comparisonHistoryRecords || []).filter(record => {
+        const createdDate = String(record.created_at || '').slice(0, 10);
+        const matchesDate = !dateValue || (createdDate && createdDate >= dateValue);
+        const matchesSteps = !minimumSteps || this.getComparisonHistoryActualSteps(record) >= minimumSteps;
+        return matchesDate && matchesSteps;
+    });
+    this.renderComparisonHistory(records);
+};
+
+Dashboard.prototype.resetComparisonHistoryFilters = function() {
+    const dateInput = document.getElementById('comparison-history-date-filter');
+    const stepsInput = document.getElementById('comparison-history-steps-filter');
+    if (dateInput) dateInput.value = '';
+    if (stepsInput) stepsInput.value = '';
+    this.renderComparisonHistory(this.comparisonHistoryRecords || []);
+};
+
+Dashboard.prototype.deleteComparisonHistory = async function(sessionId) {
+    const record = (this.comparisonHistoryRecords || []).find(item => item.session_id === sessionId);
+    const label = record?.created_at ? new Date(record.created_at).toLocaleString('zh-CN', { hour12: false }) : sessionId;
+    if (!window.confirm(`确认删除 ${label} 的历史试验吗？\n记录会移入本地回收目录。`)) return;
+    try {
+        const response = await fetch(`/api/comparison/history/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || '删除失败');
+        if (this.comparisonHistoryDetailSession === sessionId) this.closeComparisonHistoryDetail();
+        await this.loadComparisonHistory();
+    } catch (error) {
+        window.alert(`删除历史试验失败：${error.message}`);
+    }
+};
+
+Dashboard.prototype.deleteComparisonHistoryBulk = async function(mode, value, message) {
+    if (!window.confirm(`${message}\n记录会移入本地回收目录。`)) return;
+    try {
+        const response = await fetch('/api/comparison/history/delete-bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, value })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || '批量删除失败');
+        this.closeComparisonHistoryDetail();
+        await this.loadComparisonHistory();
+        window.alert(result.message);
+    } catch (error) {
+        window.alert(`批量删除历史试验失败：${error.message}`);
+    }
+};
+
+Dashboard.prototype.deleteComparisonHistoryBeforeDate = function() {
+    const value = document.getElementById('comparison-history-date-filter')?.value || '';
+    if (!value) {
+        window.alert('请先选择日期；将删除该日期之前创建的记录。');
+        return;
+    }
+    const count = (this.comparisonHistoryRecords || []).filter(record => String(record.created_at || '').slice(0, 10) < value).length;
+    if (!count) {
+        window.alert('没有早于该日期的历史试验。');
+        return;
+    }
+    this.deleteComparisonHistoryBulk('before_date', value, `确认删除 ${value} 之前的 ${count} 条历史试验吗？`);
+};
+
+Dashboard.prototype.deleteShortComparisonHistory = function() {
+    const raw = document.getElementById('comparison-history-steps-filter')?.value || '';
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+        window.alert('请先填写实际运行步数；将删除低于该步数的短试验。');
+        return;
+    }
+    const count = (this.comparisonHistoryRecords || []).filter(record => this.getComparisonHistoryActualSteps(record) < value).length;
+    if (!count) {
+        window.alert('没有低于该运行步数的短试验。');
+        return;
+    }
+    this.deleteComparisonHistoryBulk('shorter_than', value, `确认删除实际运行少于 ${value} 步的 ${count} 条历史试验吗？`);
+};
+
+Dashboard.prototype.viewComparisonHistory = async function(sessionId) {
+    const detail = document.getElementById('comparison-history-detail');
+    if (!detail) return;
+    this.comparisonHistoryDetailSession = sessionId;
+    detail.style.display = 'block';
+    const title = document.getElementById('comparison-history-detail-title');
+    const meta = document.getElementById('comparison-history-detail-meta');
+    if (title) title.textContent = '正在加载历史试验...';
+    if (meta) meta.textContent = '';
+    try {
+        const response = await fetch(`/api/comparison/history/${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || '记录读取失败');
+        const record = result.record || {};
+        const config = record.config || {};
+        const traffic = config.traffic || {};
+        const fixed = (record.experiments || []).find(item => item.experiment_id === 'fixedtime') || {};
+        const ppo = (record.experiments || []).find(item => item.experiment_id === 'ppo') || {};
+        const fixedSeries = fixed.series || [];
+        const ppoSeries = ppo.series || [];
+        const length = Math.max(fixedSeries.length, ppoSeries.length);
+        const combined = Array.from({ length }, (_, index) => {
+            const fixedPoint = fixedSeries[Math.min(index, Math.max(0, fixedSeries.length - 1))] || {};
+            const ppoPoint = ppoSeries[Math.min(index, Math.max(0, ppoSeries.length - 1))] || {};
+            return {
+                step: Math.max(this.asFiniteNumber(fixedPoint.step, 0), this.asFiniteNumber(ppoPoint.step, 0)),
+                fixedWaiting: this.asFiniteNumber(fixedPoint.statistics?.total_waiting, 0),
+                ppoWaiting: this.asFiniteNumber(ppoPoint.statistics?.total_waiting, 0),
+                fixedArrived: this.asFiniteNumber(fixedPoint.statistics?.arrived_total, 0),
+                ppoArrived: this.asFiniteNumber(ppoPoint.statistics?.arrived_total, 0)
+            };
+        });
+        const stride = Math.max(1, Math.ceil(combined.length / 240));
+        const sampled = combined.filter((_, index) => index % stride === 0 || index === combined.length - 1);
+        const createdAt = record.created_at ? new Date(record.created_at).toLocaleString('zh-CN', { hour12: false }) : sessionId;
+        if (title) title.textContent = `${createdAt} · ${traffic.name || config.traffic_profile || '默认车流'}`;
+        if (meta) meta.textContent = `${config.sim_name || '--'} · ${config.simlen || '--'} 步 · ${config.gui ? '双 GUI' : '无 GUI'} · ${sessionId}`;
+        requestAnimationFrame(() => {
+            this.drawRealtimeLineChart('comparison-history-waiting-chart', sampled, [
+                { key: 'fixedWaiting', label: 'FixedTime 排队', color: '#bf731c' },
+                { key: 'ppoWaiting', label: 'PPO 排队', color: '#705cc9' }
+            ]);
+            this.drawRealtimeLineChart('comparison-history-throughput-chart', sampled, [
+                { key: 'fixedArrived', label: 'FixedTime 驶出', color: '#bf731c' },
+                { key: 'ppoArrived', label: 'PPO 驶出', color: '#17875f' }
+            ]);
+        });
+        detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (error) {
+        if (title) title.textContent = '历史试验读取失败';
+        if (meta) meta.textContent = error.message;
+    }
+};
+
+Dashboard.prototype.closeComparisonHistoryDetail = function(scrollToHistory = false) {
+    const detail = document.getElementById('comparison-history-detail');
+    if (detail) detail.style.display = 'none';
+    this.comparisonHistoryDetailSession = null;
+    if (scrollToHistory) {
+        document.querySelector('.comparison-history-panel')?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+        });
+    }
+};
+
+Dashboard.prototype.fetchRealtimeTrafficSummary = async function(reason = '') {
+    const [summaryResponse, statusResult] = await Promise.all([
+        fetch(`${this.apiBaseUrl}/junctions/summary`, { cache: 'no-store' }),
+        fetch(`${this.apiBaseUrl}/simulation/status`, { cache: 'no-store' })
+            .then(response => response.ok ? response.json() : {})
+            .catch(() => ({}))
+    ]);
+
+    const summary = await summaryResponse.json();
+    if (!summaryResponse.ok || !summary || !summary.success || !Array.isArray(summary.summaries)) {
+        throw new Error(summary && (summary.error || summary.message) || '路口汇总数据不可用');
+    }
+
+    const message = reason ? `仿真实时流不可用，显示路口汇总：${reason}` : '显示路口汇总';
+    return {
+        source: 'summary',
+        sourceLabel: statusResult && statusResult.running ? '路口汇总' : '仿真未运行',
+        fallbackMessage: message,
+        simulation: {
+            running: !!(statusResult && statusResult.running),
+            current_step: statusResult && statusResult.current_time,
+            current_time: statusResult && statusResult.current_time,
+            total_steps: statusResult && statusResult.total_time,
+            config: statusResult && statusResult.config
+        },
+        statistics: this.normalizeRealtimeTrafficStats(null, summary.summaries),
+        junctions: summary.summaries
+    };
+};
+
+Dashboard.prototype.normalizeRealtimeTrafficStats = function(stats, junctions) {
+    const rows = Array.isArray(junctions) ? junctions : [];
+    const totals = rows.reduce((acc, junction) => {
+        const vehicles = Number(junction.total_vehicles || 0);
+        const halting = Number(junction.total_halting || 0);
+        const congestion = Number(junction.congestion_level || 0);
+
+        acc.totalVehicles += Number.isFinite(vehicles) ? vehicles : 0;
+        acc.totalHalting += Number.isFinite(halting) ? halting : 0;
+        acc.totalCongestion += Number.isFinite(congestion) ? congestion : 0;
+        if (junction.is_active !== false) acc.activeJunctions += 1;
+        return acc;
+    }, {
+        totalVehicles: 0,
+        totalHalting: 0,
+        totalCongestion: 0,
+        activeJunctions: 0
+    });
+
+    const sourceStats = stats || {};
+    const avgCongestion = rows.length ? totals.totalCongestion / rows.length : 0;
+    return {
+        total_vehicles: this.asFiniteNumber(sourceStats.total_vehicles, totals.totalVehicles),
+        total_waiting: this.asFiniteNumber(sourceStats.total_waiting, totals.totalHalting),
+        active_junctions: this.asFiniteNumber(sourceStats.active_junctions, totals.activeJunctions),
+        avg_speed: this.asFiniteNumber(sourceStats.avg_speed, 0),
+        avg_congestion: this.asFiniteNumber(sourceStats.avg_congestion, avgCongestion),
+        active_vehicles: this.asFiniteNumber(sourceStats.active_vehicles, totals.totalVehicles),
+        departed_step: this.asFiniteNumber(sourceStats.departed_step, 0),
+        arrived_step: this.asFiniteNumber(sourceStats.arrived_step, 0),
+        departed_total: this.asFiniteNumber(sourceStats.departed_total, 0),
+        arrived_total: this.asFiniteNumber(sourceStats.arrived_total, 0)
+    };
+};
+
+Dashboard.prototype.asFiniteNumber = function(value, fallback = 0) {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) ? numberValue : fallback;
+};
+
+Dashboard.prototype.renderRealtimeTrafficData = function(payload) {
+    const body = document.getElementById('realtime-data-body');
+    if (!body) return;
+
+    const stats = payload.statistics || {};
+    const simulation = payload.simulation || {};
+    const junctions = Array.isArray(payload.junctions) ? payload.junctions : [];
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    };
+
+    const currentStep = this.asFiniteNumber(simulation.current_step ?? simulation.current_time, 0);
+    const totalSteps = this.asFiniteNumber(simulation.total_steps, 0);
+    const stepText = totalSteps > 0 ? `${Math.round(currentStep)}/${Math.round(totalSteps)}` : (simulation.running ? `${Math.round(currentStep)}` : '待机');
+
+    setText('realtime-total-vehicles', Math.round(this.asFiniteNumber(stats.total_vehicles, 0)));
+    setText('realtime-total-halting', Math.round(this.asFiniteNumber(stats.total_waiting, 0)));
+    setText('realtime-active-junctions', Math.round(this.asFiniteNumber(stats.active_junctions, junctions.length)));
+    setText('realtime-avg-congestion', `${Math.round(this.asFiniteNumber(stats.avg_congestion, 0) * 100)}%`);
+    setText('realtime-step', stepText);
+    setText('realtime-updated-at', `更新 ${new Date().toLocaleTimeString()}`);
+
+    const status = document.getElementById('realtime-data-status');
+    if (status) {
+        status.textContent = payload.sourceLabel || '已更新';
+        status.className = `realtime-status-pill ${payload.source === 'simulation' && simulation.running ? 'running' : 'fallback'}`;
+        status.title = payload.fallbackMessage || '';
+    }
+
+    this.updateRealtimeCharts(payload);
+
+    body.textContent = '';
+    const empty = document.getElementById('realtime-data-empty');
+    if (empty) {
+        empty.style.display = junctions.length ? 'none' : 'flex';
+    }
+
+    const sortedJunctions = [...junctions].sort((a, b) => {
+        const congestionDiff = this.asFiniteNumber(b.congestion_level, 0) - this.asFiniteNumber(a.congestion_level, 0);
+        if (congestionDiff !== 0) return congestionDiff;
+        const haltingDiff = this.asFiniteNumber(b.total_halting, 0) - this.asFiniteNumber(a.total_halting, 0);
+        if (haltingDiff !== 0) return haltingDiff;
+        const vehicleDiff = this.asFiniteNumber(b.total_vehicles, 0) - this.asFiniteNumber(a.total_vehicles, 0);
+        if (vehicleDiff !== 0) return vehicleDiff;
+        return String(a.junction_id || '').localeCompare(String(b.junction_id || ''));
+    });
+
+    sortedJunctions.forEach(junction => {
+        const row = document.createElement('tr');
+        const congestion = this.asFiniteNumber(junction.congestion_level, 0);
+        const cells = [
+            junction.junction_id || '--',
+            junction.junction_type === 'traffic_light' ? '信号灯' : (junction.junction_type || '路口'),
+            Math.round(this.asFiniteNumber(junction.total_vehicles, 0)),
+            Math.round(this.asFiniteNumber(junction.total_halting, 0)),
+            this.formatCongestion(congestion),
+            junction.is_active === false ? '离线' : '在线'
+        ];
+
+        cells.forEach((value, index) => {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            if (index === 4) cell.className = this.getCongestionClass(congestion);
+            if (index === 5) cell.className = junction.is_active === false ? 'state-offline' : 'state-online';
+            row.appendChild(cell);
+        });
+        body.appendChild(row);
+    });
+};
+
+Dashboard.prototype.updateRealtimeCharts = function(payload) {
+    const simulation = payload.simulation || {};
+    const stats = payload.statistics || {};
+    const step = this.asFiniteNumber(simulation.current_step ?? simulation.current_time, 0);
+    const sessionKey = `${simulation.config || 'unknown'}:${simulation.total_steps || 0}`;
+    const isLiveSimulation = payload.source === 'simulation' && simulation.running;
+
+    if (!Array.isArray(this.realtimeHistory)) {
+        this.realtimeHistory = [];
+    }
+    if (isLiveSimulation && this.realtimeHistorySession !== sessionKey) {
+        this.realtimeHistory = [];
+        this.realtimeHistorySession = sessionKey;
+    }
+
+    const previous = this.realtimeHistory[this.realtimeHistory.length - 1];
+    if (isLiveSimulation && previous && step < previous.step) {
+        this.realtimeHistory = [];
+    }
+
+    const latest = this.realtimeHistory[this.realtimeHistory.length - 1];
+    const departedTotal = this.asFiniteNumber(stats.departed_total, 0);
+    const arrivedTotal = this.asFiniteNumber(stats.arrived_total, 0);
+    const point = {
+        step,
+        active: this.asFiniteNumber(stats.active_vehicles, stats.total_vehicles),
+        waiting: this.asFiniteNumber(stats.total_waiting, 0),
+        departedTotal,
+        arrivedTotal,
+        departedSample: latest
+            ? Math.max(0, departedTotal - latest.departedTotal)
+            : this.asFiniteNumber(stats.departed_step, 0),
+        arrivedSample: latest
+            ? Math.max(0, arrivedTotal - latest.arrivedTotal)
+            : this.asFiniteNumber(stats.arrived_step, 0)
+    };
+
+    if (isLiveSimulation) {
+        if (latest && latest.step === step) {
+            this.realtimeHistory[this.realtimeHistory.length - 1] = point;
+        } else {
+            this.realtimeHistory.push(point);
+            if (this.realtimeHistory.length > 60) {
+                this.realtimeHistory.shift();
+            }
+        }
+    }
+
+    const history = this.realtimeHistory || [];
+    this.drawRealtimeLineChart('realtime-load-chart', history, [
+        { key: 'active', label: '在途车辆', color: '#5dd7ff' },
+        { key: 'waiting', label: '排队车辆', color: '#ffb454' }
+    ]);
+    this.drawRealtimeLineChart('realtime-flow-chart', history, [
+        { key: 'departedSample', label: '产生车辆', color: '#8b7cff' },
+        { key: 'arrivedSample', label: '成功驶出', color: '#2ee59d' }
+    ]);
+    this.drawRealtimeLineChart('realtime-throughput-chart', history, [
+        { key: 'departedTotal', label: '累计驶入', color: '#8b7cff' },
+        { key: 'arrivedTotal', label: '累计驶出', color: '#2ee59d' }
+    ]);
+};
+
+Dashboard.prototype.drawRealtimeLineChart = function(canvasId, history, series) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(260, Math.floor(rect.width || canvas.parentElement?.clientWidth || 320));
+    const height = Math.max(150, Math.floor(rect.height || 170));
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    const padding = { left: 42, right: 12, top: 34, bottom: 24 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const values = history.flatMap(point => series.map(item => this.asFiniteNumber(point[item.key], 0)));
+    const rawMax = values.length ? Math.max(...values, 1) : 1;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawMax)));
+    const yMax = Math.max(magnitude, Math.ceil(rawMax / magnitude) * magnitude);
+
+    ctx.font = '11px sans-serif';
+    ctx.textBaseline = 'middle';
+    for (let index = 0; index <= 4; index += 1) {
+        const y = padding.top + (plotHeight * index / 4);
+        const value = Math.round(yMax * (1 - index / 4));
+        ctx.strokeStyle = 'rgba(80, 112, 119, 0.14)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(width - padding.right, y);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(65, 93, 99, 0.68)';
+        ctx.textAlign = 'right';
+        ctx.fillText(String(value), padding.left - 7, y);
+    }
+
+    let legendX = padding.left;
+    series.forEach(item => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(legendX, 9, 12, 3);
+        ctx.fillStyle = 'rgba(36, 63, 69, 0.82)';
+        ctx.textAlign = 'left';
+        ctx.fillText(item.label, legendX + 17, 11);
+        legendX += ctx.measureText(item.label).width + 42;
+    });
+
+    if (!history.length) {
+        ctx.fillStyle = 'rgba(65, 93, 99, 0.56)';
+        ctx.textAlign = 'center';
+        ctx.fillText('启动仿真后开始记录', padding.left + plotWidth / 2, padding.top + plotHeight / 2);
+        return;
+    }
+
+    const xAt = index => padding.left + (history.length === 1 ? plotWidth / 2 : plotWidth * index / (history.length - 1));
+    const yAt = value => padding.top + plotHeight * (1 - this.asFiniteNumber(value, 0) / yMax);
+    series.forEach(item => {
+        ctx.strokeStyle = item.color;
+        ctx.fillStyle = item.color;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        history.forEach((point, index) => {
+            const x = xAt(index);
+            const y = yAt(point[item.key]);
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        const lastIndex = history.length - 1;
+        ctx.beginPath();
+        ctx.arc(xAt(lastIndex), yAt(history[lastIndex][item.key]), 3, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    ctx.fillStyle = 'rgba(65, 93, 99, 0.68)';
+    ctx.textAlign = 'left';
+    ctx.fillText(`步 ${Math.round(history[0].step)}`, padding.left, height - 9);
+    ctx.textAlign = 'right';
+    ctx.fillText(`步 ${Math.round(history[history.length - 1].step)}`, width - padding.right, height - 9);
+};
+
+Dashboard.prototype.renderRealtimeTrafficError = function(message) {
+    const status = document.getElementById('realtime-data-status');
+    if (status) {
+        status.textContent = '读取失败';
+        status.className = 'realtime-status-pill error';
+        status.title = message || '';
+    }
+
+    const empty = document.getElementById('realtime-data-empty');
+    if (empty) {
+        empty.style.display = 'flex';
+        const title = empty.querySelector('p');
+        if (title) title.textContent = `实时交通数据读取失败：${message || '未知错误'}`;
+        const info = empty.querySelector('.info-text');
+        if (info) info.textContent = '请检查 SV Dashboard 后端是否仍在运行。';
+    }
+
+    const body = document.getElementById('realtime-data-body');
+    if (body) body.textContent = '';
+};
+
+Dashboard.prototype.formatCongestion = function(value) {
+    const congestion = this.asFiniteNumber(value, 0);
+    const percent = `${Math.round(congestion * 100)}%`;
+    if (congestion >= 0.7) return `严重 ${percent}`;
+    if (congestion >= 0.45) return `拥堵 ${percent}`;
+    if (congestion >= 0.2) return `缓行 ${percent}`;
+    return `畅通 ${percent}`;
+};
+
+Dashboard.prototype.getCongestionClass = function(value) {
+    const congestion = this.asFiniteNumber(value, 0);
+    if (congestion >= 0.7) return 'congestion severe';
+    if (congestion >= 0.45) return 'congestion jammed';
+    if (congestion >= 0.2) return 'congestion slow';
+    return 'congestion clear';
 };
 
 /**
@@ -1389,19 +2284,30 @@ Dashboard.prototype.openModelsTool = async function() {
  * 绑定模型工具事件
  */
 Dashboard.prototype.bindModelsToolEvents = function() {
-    // 搜索框
+    this.modelsCache = [];
+    this.selectedAlgorithm = '';
+    this.modelsSearchQuery = '';
+
     const searchInput = document.getElementById('model-search');
     if (searchInput) {
         searchInput.addEventListener('input', () => {
+            this.modelsSearchQuery = searchInput.value.trim().toLowerCase();
             this.filterModelsList();
         });
     }
-    
-    // 算法过滤
-    const algorithmFilter = document.getElementById('algorithm-filter');
-    if (algorithmFilter) {
-        algorithmFilter.addEventListener('change', () => {
-            this.loadModelsList();
+
+    const clearFilterBtn = document.getElementById('models-clear-filter-btn');
+    if (clearFilterBtn) {
+        clearFilterBtn.addEventListener('click', () => {
+            this.selectedAlgorithm = '';
+            this.renderModelsList();
+        });
+    }
+
+    const backBtn = document.getElementById('models-back-btn');
+    if (backBtn) {
+        backBtn.addEventListener('click', () => {
+            this.showModelsOverview();
         });
     }
 };
@@ -1411,79 +2317,255 @@ Dashboard.prototype.bindModelsToolEvents = function() {
  */
 Dashboard.prototype.loadModelsList = async function() {
     try {
-        const algorithmFilter = document.getElementById('algorithm-filter');
-        const algorithm = algorithmFilter ? algorithmFilter.value : '';
-        
-        const params = new URLSearchParams();
-        if (algorithm) {
-            params.append('algorithm', algorithm);
-        }
-        
-        const response = await fetch(`${this.apiBaseUrl}/tools/models/list?${params}`);
+        const response = await fetch(`${this.apiBaseUrl}/tools/models/list`);
         const result = await response.json();
         
         if (!result.success) {
             throw new Error(result.message);
         }
-        
-        this.renderModelsList(result.models);
+
+        this.modelsCache = Array.isArray(result.models) ? result.models : [];
+        this.renderModelsList();
         
     } catch (error) {
         console.error('加载模型列表失败:', error);
-        const listContainer = document.getElementById('models-list');
-        if (listContainer) {
-            listContainer.innerHTML = `
-                <div class="loading-message" style="color: var(--danger-color);">
-                    加载失败: ${error.message}
-                </div>
-            `;
-        }
+        const board = document.getElementById('models-group-board');
+        const nav = document.getElementById('algorithm-nav');
+        const message = `
+            <div class="loading-message" style="color: var(--danger-color);">
+                加载失败: ${this.escapeHtml(error.message)}
+            </div>
+        `;
+        if (board) board.innerHTML = message;
+        if (nav) nav.innerHTML = message;
     }
 };
 
 /**
  * 渲染模型列表
  */
-Dashboard.prototype.renderModelsList = function(models) {
-    const listContainer = document.getElementById('models-list');
-    if (!listContainer) return;
-    
+Dashboard.prototype.renderModelsList = function() {
+    const board = document.getElementById('models-group-board');
+    if (!board) return;
+
+    const models = this.getFilteredModels();
+    this.renderModelsSummary(models);
+    this.renderAlgorithmNav();
+    this.renderModelsOverviewTitle(models.length);
+
     if (models.length === 0) {
-        listContainer.innerHTML = '<div class="loading-message">没有找到模型</div>';
+        board.innerHTML = '<div class="loading-message">没有找到匹配的模型</div>';
         return;
     }
-    
-    listContainer.innerHTML = models.map(model => `
-        <div class="model-item" data-model-id="${model.id}" onclick="dashboard.showModelDetail('${model.id}')">
-            <div class="model-item-header">
-                <span class="model-item-name">${model.network}/${model.name}</span>
-                <span class="model-item-algorithm">${model.algorithm.toUpperCase()}</span>
+
+    const groups = this.groupModelsByAlgorithm(models);
+    board.innerHTML = groups.map(group => `
+        <section class="model-group-section" data-algorithm="${this.escapeAttribute(group.algorithm)}">
+            <div class="model-group-header">
+                <div>
+                    <h4>${this.escapeHtml(this.getAlgorithmDisplayName(group.algorithm))}</h4>
+                    <p>${group.networkCount} 个路网 · ${group.trainedCount} 个已训练 · 最近 ${this.escapeHtml(this.formatModelTime(group.latestModified))}</p>
+                </div>
+                <span class="model-group-count">${group.models.length}</span>
             </div>
-            <div class="model-item-info">
-                ${model.weight_count ? `<span>💾 ${model.weight_count} 个权重文件</span>` : ''}
-                ${model.max_epoch ? `<span>🔄 Epoch: ${model.max_epoch}</span>` : ''}
+            <div class="model-card-grid">
+                ${group.models.map(model => this.renderModelCard(model)).join('')}
             </div>
-        </div>
+        </section>
     `).join('');
+
+    this.bindModelCardEvents();
+};
+
+Dashboard.prototype.filterModelsList = function() {
+    this.renderModelsList();
+};
+
+Dashboard.prototype.getFilteredModels = function() {
+    const query = this.modelsSearchQuery || '';
+    return (this.modelsCache || []).filter(model => {
+        const algorithm = this.getCanonicalAlgorithm(model.algorithm || 'unknown');
+        if (this.selectedAlgorithm && algorithm !== this.selectedAlgorithm) {
+            return false;
+        }
+        if (!query) {
+            return true;
+        }
+        const searchable = [
+            model.id,
+            model.name,
+            model.network,
+            model.sim,
+            model.algorithm,
+            model.agent
+        ].filter(Boolean).join(' ').toLowerCase();
+        return searchable.includes(query);
+    });
+};
+
+Dashboard.prototype.groupModelsByAlgorithm = function(models) {
+    const groups = new Map();
+    models.forEach(model => {
+        const algorithm = this.getCanonicalAlgorithm(model.algorithm || 'unknown');
+        if (!groups.has(algorithm)) {
+            groups.set(algorithm, []);
+        }
+        groups.get(algorithm).push(model);
+    });
+
+    return Array.from(groups.entries()).map(([algorithm, groupModels]) => {
+        const networks = new Set(groupModels.map(model => model.network || model.sim || 'unknown'));
+        const latestModified = Math.max(...groupModels.map(model => Number(model.modified_time || 0)));
+        return {
+            algorithm,
+            models: groupModels.sort((a, b) => Number(b.modified_time || 0) - Number(a.modified_time || 0)),
+            networkCount: networks.size,
+            trainedCount: groupModels.filter(model => model.has_weights).length,
+            latestModified
+        };
+    }).sort((a, b) => {
+        const orderA = this.getAlgorithmSortRank(a.algorithm);
+        const orderB = this.getAlgorithmSortRank(b.algorithm);
+        if (orderA !== orderB) return orderA - orderB;
+        return this.getAlgorithmDisplayName(a.algorithm).localeCompare(this.getAlgorithmDisplayName(b.algorithm));
+    });
+};
+
+Dashboard.prototype.renderModelsSummary = function(models) {
+    const total = document.getElementById('models-total-count');
+    const trained = document.getElementById('models-trained-count');
+    if (total) total.textContent = models.length;
+    if (trained) trained.textContent = models.filter(model => model.has_weights).length;
+};
+
+Dashboard.prototype.renderAlgorithmNav = function() {
+    const nav = document.getElementById('algorithm-nav');
+    if (!nav) return;
+
+    const searchFilteredModels = (this.modelsCache || []).filter(model => {
+        if (!this.modelsSearchQuery) return true;
+        const searchable = [
+            model.id,
+            model.name,
+            model.network,
+            model.sim,
+            model.algorithm,
+            model.agent
+        ].filter(Boolean).join(' ').toLowerCase();
+        return searchable.includes(this.modelsSearchQuery);
+    });
+    const groups = this.groupModelsByAlgorithm(searchFilteredModels);
+    const total = searchFilteredModels.length;
+
+    nav.innerHTML = `
+        <button class="algorithm-nav-item ${this.selectedAlgorithm ? '' : 'active'}" type="button" data-algorithm="">
+            <span>
+                <strong>全部算法</strong>
+                <small>${groups.length} 类算法</small>
+            </span>
+            <em>${total}</em>
+        </button>
+        ${groups.map(group => `
+            <button class="algorithm-nav-item ${this.selectedAlgorithm === group.algorithm ? 'active' : ''}" type="button" data-algorithm="${this.escapeAttribute(group.algorithm)}">
+                <span>
+                    <strong>${this.escapeHtml(this.getAlgorithmDisplayName(group.algorithm))}</strong>
+                    <small>${group.networkCount} 个路网 · ${group.trainedCount} 已训练</small>
+                </span>
+                <em>${group.models.length}</em>
+            </button>
+        `).join('')}
+    `;
+
+    nav.querySelectorAll('.algorithm-nav-item').forEach(item => {
+        item.addEventListener('click', () => {
+            this.selectedAlgorithm = item.dataset.algorithm || '';
+            this.renderModelsList();
+        });
+    });
+};
+
+Dashboard.prototype.renderModelsOverviewTitle = function(count) {
+    const title = document.getElementById('models-overview-title');
+    const subtitle = document.getElementById('models-overview-subtitle');
+    if (title) {
+        title.textContent = this.selectedAlgorithm
+            ? `${this.getAlgorithmDisplayName(this.selectedAlgorithm)} 模型`
+            : '模型分组';
+    }
+    if (subtitle) {
+        const queryText = this.modelsSearchQuery ? ` · 搜索 "${this.modelsSearchQuery}"` : '';
+        subtitle.textContent = `当前显示 ${count} 个模型${queryText}`;
+    }
+};
+
+Dashboard.prototype.renderModelCard = function(model) {
+    const modelKey = this.getModelKey(model);
+    const epoch = model.latest_epoch ?? model.max_epoch;
+    const isRuleAlgorithm = ['maxpressure', 'fixedtime'].includes(this.getCanonicalAlgorithm(model.algorithm));
+    const statusClass = model.has_weights ? 'trained' : (isRuleAlgorithm ? 'rule' : 'untrained');
+    const statusText = model.has_weights ? '已训练' : (isRuleAlgorithm ? '规则' : '无权重');
+    const metaItems = [
+        this.escapeHtml(model.network || model.sim || '未知路网'),
+        model.weight_count ? `${Number(model.weight_count)} 权重` : '无权重文件',
+        epoch !== undefined && epoch !== null ? `Epoch ${this.escapeHtml(String(epoch))}` : '无 epoch',
+        model.has_metrics ? '有指标' : '无指标'
+    ];
+
+    return `
+        <button class="model-card" type="button" data-model-id="${this.escapeAttribute(model.id || '')}" data-model-key="${this.escapeAttribute(modelKey)}">
+            <div class="model-card-top">
+                <span class="model-card-name">${this.escapeHtml(model.name || '未命名模型')}</span>
+                <span class="model-card-status ${statusClass}">${statusText}</span>
+            </div>
+            <div class="model-card-path">${this.escapeHtml(model.network || model.sim || 'unknown')} / ${this.escapeHtml(model.name || '')}</div>
+            <div class="model-card-meta">
+                ${metaItems.map(item => `<span>${item}</span>`).join('')}
+            </div>
+            <div class="model-card-agent">${this.escapeHtml(model.agent || model.algorithm || '')}</div>
+        </button>
+    `;
+};
+
+Dashboard.prototype.bindModelCardEvents = function() {
+    document.querySelectorAll('.model-card').forEach(card => {
+        card.addEventListener('click', () => {
+            this.showModelDetail(card.dataset.modelId, card.dataset.modelKey);
+        });
+    });
+};
+
+Dashboard.prototype.showModelsOverview = function() {
+    const overview = document.getElementById('models-overview');
+    const detailPanel = document.getElementById('models-detail');
+    const placeholder = document.getElementById('detail-placeholder');
+    const content = document.getElementById('detail-content');
+    if (overview) overview.style.display = 'flex';
+    if (detailPanel) detailPanel.classList.remove('active');
+    if (placeholder) placeholder.style.display = 'flex';
+    if (content) content.style.display = 'none';
+    document.querySelectorAll('.model-card').forEach(item => item.classList.remove('active'));
 };
 
 /**
  * 显示模型详情
  */
-Dashboard.prototype.showModelDetail = async function(modelId) {
+Dashboard.prototype.showModelDetail = async function(modelId, modelKey = '') {
     try {
         // 更新选中状态
-        document.querySelectorAll('.model-item').forEach(item => {
+        document.querySelectorAll('.model-card').forEach(item => {
             item.classList.remove('active');
+            if (modelKey && item.dataset.modelKey === modelKey) {
+                item.classList.add('active');
+            }
         });
-        const selectedItem = document.querySelector(`[data-model-id="${modelId}"]`);
-        if (selectedItem) {
-            selectedItem.classList.add('active');
-        }
         
         // 显示详情区域
+        const overview = document.getElementById('models-overview');
+        const detailPanel = document.getElementById('models-detail');
         const placeholder = document.getElementById('detail-placeholder');
         const content = document.getElementById('detail-content');
+        if (overview) overview.style.display = 'none';
+        if (detailPanel) detailPanel.classList.add('active');
         if (placeholder) placeholder.style.display = 'none';
         if (content) content.style.display = 'block';
         
@@ -1512,10 +2594,12 @@ Dashboard.prototype.renderModelDetail = function(modelInfo) {
     const titleEl = document.getElementById('detail-title');
     const algorithmEl = document.getElementById('detail-algorithm');
     const statusEl = document.getElementById('detail-status');
+    const canonicalAlgorithm = this.getCanonicalAlgorithm(modelInfo.algorithm);
+    const isRuleAlgorithm = ['maxpressure', 'fixedtime'].includes(canonicalAlgorithm);
     
     if (titleEl) titleEl.textContent = modelInfo.name;
-    if (algorithmEl) algorithmEl.textContent = modelInfo.algorithm.toUpperCase();
-    if (statusEl) statusEl.textContent = modelInfo.has_weights ? '已训练' : '未完成';
+    if (algorithmEl) algorithmEl.textContent = this.getAlgorithmDisplayName(modelInfo.algorithm);
+    if (statusEl) statusEl.textContent = modelInfo.has_weights ? '已训练' : (isRuleAlgorithm ? '规则算法' : '未完成');
     
     // 训练指标图
     const metricsImg = document.getElementById('metrics-image');
@@ -1523,6 +2607,10 @@ Dashboard.prototype.renderModelDetail = function(modelInfo) {
     
     if (modelInfo.has_metrics) {
         if (metricsImg) {
+            metricsImg.onerror = () => {
+                metricsImg.style.display = 'none';
+                if (metricsError) metricsError.style.display = 'block';
+            };
             metricsImg.src = `${this.apiBaseUrl}/tools/models/file/${modelInfo.id}/metrics`;
             metricsImg.style.display = 'block';
         }
@@ -1562,8 +2650,8 @@ Dashboard.prototype.renderModelDetail = function(modelInfo) {
             .filter(key => modelInfo.parameters[key] !== undefined)
             .map(key => `
                 <div class="param-item">
-                    <div class="param-label">${paramLabels[key] || key}</div>
-                    <div class="param-value">${JSON.stringify(modelInfo.parameters[key])}</div>
+                    <div class="param-label">${this.escapeHtml(paramLabels[key] || key)}</div>
+                    <div class="param-value">${this.escapeHtml(JSON.stringify(modelInfo.parameters[key]))}</div>
                 </div>
             `).join('');
         
@@ -1579,7 +2667,7 @@ Dashboard.prototype.renderModelDetail = function(modelInfo) {
                     <div class="file-icon">💾</div>
                     <div class="file-info-text">
                         <div class="file-info-name">模型权重</div>
-                        <div class="file-info-meta">${modelInfo.weight_count} 个 .pt 文件</div>
+                        <div class="file-info-meta">${Number(modelInfo.weight_count || 0)} 个 .pt 文件</div>
                     </div>
                 </div>
             ` : ''}
@@ -1605,6 +2693,67 @@ Dashboard.prototype.renderModelDetail = function(modelInfo) {
     }
 };
 
+Dashboard.prototype.getModelKey = function(model) {
+    return [model.id || '', model.agent || '', model.path || ''].join('|');
+};
+
+Dashboard.prototype.getCanonicalAlgorithm = function(algorithm = '') {
+    const normalized = String(algorithm || 'unknown').toLowerCase();
+    if (normalized.includes('maxpressure')) return 'maxpressure';
+    if (normalized.includes('fixedtime')) return 'fixedtime';
+    if (normalized.includes('colight')) return 'colight';
+    if (normalized.includes('ppo')) return 'ppo';
+    if (normalized.includes('maddpg_v2')) return 'maddpg_v2';
+    if (normalized.includes('maddpg')) return 'maddpg';
+    return normalized || 'unknown';
+};
+
+Dashboard.prototype.getAlgorithmSortRank = function(algorithm = '') {
+    const normalized = this.getCanonicalAlgorithm(algorithm);
+    const order = ['maxpressure', 'fixedtime', 'colight', 'ppo', 'maddpg_v2', 'maddpg'];
+    const index = order.findIndex(item => normalized === item || normalized.includes(item));
+    return index === -1 ? 100 : index;
+};
+
+Dashboard.prototype.getAlgorithmDisplayName = function(algorithm = '') {
+    const normalized = this.getCanonicalAlgorithm(algorithm);
+    const labels = {
+        maxpressure: 'MaxPressure',
+        fixedtime: 'FixedTime',
+        colight: 'CoLight',
+        ppo: 'PPO',
+        maddpg_v2: 'MADDPG V2',
+        maddpg: 'MADDPG',
+        unknown: '未知算法'
+    };
+    if (labels[normalized]) return labels[normalized];
+    if (normalized.includes('colight')) return 'CoLight';
+    if (normalized.includes('ppo')) return 'PPO';
+    if (normalized.includes('maxpressure')) return 'MaxPressure';
+    if (normalized.includes('fixedtime')) return 'FixedTime';
+    if (normalized.includes('maddpg')) return 'MADDPG';
+    return String(algorithm || 'unknown').replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+};
+
+Dashboard.prototype.formatModelTime = function(timestamp) {
+    const value = Number(timestamp || 0);
+    if (!value) return '未知';
+    return new Date(value * 1000).toLocaleDateString();
+};
+
+Dashboard.prototype.escapeHtml = function(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+};
+
+Dashboard.prototype.escapeAttribute = function(value) {
+    return this.escapeHtml(value);
+};
 /**
  * 打开持续学习工具
  */
@@ -2219,6 +3368,11 @@ Dashboard.prototype.closeTool = function() {
     if (this.comparisonStatusInterval) {
         clearInterval(this.comparisonStatusInterval);
         this.comparisonStatusInterval = null;
+    }
+
+    if (this.dataToolTimer) {
+        clearInterval(this.dataToolTimer);
+        this.dataToolTimer = null;
     }
     
     // 取消工具项激活状态

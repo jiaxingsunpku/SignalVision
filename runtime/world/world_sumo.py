@@ -147,7 +147,7 @@ class Intersection(object):
             tmp_lanelinks = []
             tmp_startane = []
             for n, i in enumerate(p.state):
-                if i == 'G' or i == 's':
+                if i == 'G' or i == 'g' or i == 's':
                     # skip if empty link
                     links = self.world.eng.trafficlight.getControlledLinks(self.id)
                     
@@ -284,6 +284,7 @@ class Intersection(object):
         '''
         # TODO: check if change state, yellow phase must less than minimum of action time
         # test yellow finished first
+        previous_phase = self.get_current_phase()
         self.virtual_phase = action
         if self.current_phase_time >= self.yellow_phase_time:
             self._change_phase(action)
@@ -297,7 +298,10 @@ class Intersection(object):
             else:
                 self._change_phase(action)
 
-        self.current_phase_time += 1
+        if self.get_current_phase() != previous_phase:
+            self.current_phase_time = 1
+        else:
+            self.current_phase_time += 1
 
     def observe(self, step_length, distance):
         '''
@@ -423,9 +427,17 @@ class World(object):
             raise Exception('NOT IMPORTED YET')
         with open(abs_sumo_config) as f:
             sumo_dict = json.load(f)
+        # Dashboard 会按本次请求在内存中覆盖 gui 等 world 参数。
+        # 不能只重读磁盘 cfg，否则 maxpressure_gui 仍会启动无界面 sumo。
+        runtime_world = Registry.mapping['world_mapping']['setting'].param
+        for key in sumo_dict:
+            if runtime_world.get(key) is not None:
+                sumo_dict[key] = runtime_world[key]
         data_root = os.path.abspath(os.path.join(trainer_root, sumo_dict['dir']))
         if sumo_dict['gui'] == "True" or sumo_dict['gui'] == True:
-            sumo_cmd = [sumolib.checkBinary('sumo-gui')]  
+            # SUMO-GUI 默认加载后暂停。对比实验同时打开两个窗口时无法手动
+            # 同步点击开始，因此让每个 GUI 在完成加载后自动进入运行状态。
+            sumo_cmd = [sumolib.checkBinary('sumo-gui'), '--start']
         else:
             sumo_cmd = [sumolib.checkBinary('sumo')]
         self.net = os.path.abspath(os.path.join(data_root, sumo_dict['roadnetFile']))

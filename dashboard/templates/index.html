@@ -253,20 +253,23 @@
                     <div class="connection-options">
                         <h4>连接选项</h4>
                         
-                        <!-- 启动SUMO模拟 -->
+                        <!-- 单方法模拟 -->
                         <div class="connection-option">
                             <div class="option-header">
                                 <span class="option-icon">🚦</span>
                                 <div class="option-info">
-                                    <div class="option-title">启动SUMO模拟</div>
+                                    <div class="option-title">单方法模拟</div>
                                     <div class="option-desc" id="sumo-desc">
-                                        运行本地交通仿真测试 | 场景: <span id="current-sim-map">加载中...</span>
+                                        选择一种信号控制方法运行仿真 | 场景: <span id="current-sim-map">加载中...</span>
                                     </div>
                                 </div>
                             </div>
-                            <div class="option-controls">
+                            <div class="option-controls simulation-controls">
                                 <select id="sumo-map" class="config-select">
                                     <option value="">加载地图中...</option>
+                                </select>
+                                <select id="sumo-traffic-profile" class="config-select" aria-label="车流方案">
+                                    <option value="">加载车流中...</option>
                                 </select>
                                 <select id="sumo-config" class="config-select">
                                     <option value="">加载中...</option>
@@ -278,6 +281,43 @@
                                 <button class="action-btn secondary-btn" onclick="dashboard.stopSumoSimulation()" 
                                         id="stop-sumo-btn" style="display: none;">
                                     停止
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 对比试验 -->
+                        <div class="connection-option comparison-option">
+                            <div class="option-header">
+                                <span class="option-icon">⚖️</span>
+                                <div class="option-info">
+                                    <div class="option-title">对比试验</div>
+                                    <div class="option-desc">
+                                        同时运行 FixedTime 与 PPO，使用相同地图和车流
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="option-controls simulation-controls">
+                                <select id="comparison-map" class="config-select" aria-label="对比试验地图">
+                                    <option value="">加载地图中...</option>
+                                </select>
+                                <select id="comparison-traffic-profile" class="config-select" aria-label="对比试验车流方案">
+                                    <option value="">加载车流中...</option>
+                                </select>
+                                <label class="comparison-gui-toggle" for="comparison-gui-enabled">
+                                    <span class="comparison-gui-toggle-text">
+                                        <strong>SUMO-GUI</strong>
+                                        <small>同时打开两个窗口</small>
+                                    </span>
+                                    <input type="checkbox" id="comparison-gui-enabled" checked>
+                                    <span class="comparison-toggle-track" aria-hidden="true"></span>
+                                </label>
+                                <button class="action-btn comparison-btn" onclick="dashboard.startRealtimeComparison()"
+                                        id="start-comparison-btn">
+                                    启动对比试验
+                                </button>
+                                <button class="action-btn secondary-btn" onclick="dashboard.stopRealtimeComparison()"
+                                        id="stop-comparison-btn" style="display: none;">
+                                    终止对比试验
                                 </button>
                             </div>
                         </div>

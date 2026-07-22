@@ -7,6 +7,7 @@ LibSignal 运行时适配器
 
 import logging
 import os
+import subprocess
 import sys
 import importlib
 import importlib.util
@@ -147,6 +148,13 @@ class LibSignalSimulation(StandardSimulation):
         self._vehiclegen = None
         self._pending_actions = None
         self.step_count = 0
+        self.traffic_metrics = {
+            'departed_step': 0,
+            'arrived_step': 0,
+            'departed_total': 0,
+            'arrived_total': 0,
+            'active_vehicles': 0,
+        }
 
         print(
             f"[LibSignalSimulation] 初始化完成: world={self.libsignal_args.world}, "
@@ -154,6 +162,12 @@ class LibSignalSimulation(StandardSimulation):
         )
 
     def _override_runtime_flags(self):
+        if getattr(self.libsignal_args, 'gui', None) is not None:
+            self.config.setdefault('world', {})['gui'] = bool(self.libsignal_args.gui)
+        if getattr(self.libsignal_args, 'flow_file', ''):
+            self.config.setdefault('world', {})['flowFile'] = self.libsignal_args.flow_file
+        if getattr(self.libsignal_args, 'combined_file', None) is not None:
+            self.config.setdefault('world', {})['combined_file'] = self.libsignal_args.combined_file
         if getattr(self.libsignal_args, 'load_model', None) is not None:
             self.config['model']['load_model'] = self.libsignal_args.load_model
         if getattr(self.libsignal_args, 'test_model', None) is not None:
@@ -234,8 +248,19 @@ class LibSignalSimulation(StandardSimulation):
             return
 
         self.env.reset()
+        for agent in self.agents or []:
+            reset_fn = getattr(agent, 'reset', None)
+            if callable(reset_fn):
+                reset_fn()
         self._pending_actions = None
         self.step_count = 0
+        self.traffic_metrics.update({
+            'departed_step': 0,
+            'arrived_step': 0,
+            'departed_total': 0,
+            'arrived_total': 0,
+            'active_vehicles': 0,
+        })
         self._started = True
         print("[LibSignalSimulation] 仿真已启动")
 
@@ -248,6 +273,20 @@ class LibSignalSimulation(StandardSimulation):
 
         entering_v = self.world.eng.simulation.getDepartedIDList()
         exiting_v = self.world.eng.simulation.getArrivedIDList()
+        try:
+            active_count = len(self.world.eng.vehicle.getIDList())
+        except Exception:
+            active_count = max(
+                0,
+                self.traffic_metrics['active_vehicles'] + len(entering_v) - len(exiting_v)
+            )
+        self.traffic_metrics.update({
+            'departed_step': len(entering_v),
+            'arrived_step': len(exiting_v),
+            'departed_total': self.traffic_metrics['departed_total'] + len(entering_v),
+            'arrived_total': self.traffic_metrics['arrived_total'] + len(exiting_v),
+            'active_vehicles': active_count,
+        })
         for vehicle_id in entering_v:
             self.world.inside_vehicles[vehicle_id] = self.world.eng.simulation.getTime()
         for vehicle_id in exiting_v:
@@ -264,7 +303,7 @@ class LibSignalSimulation(StandardSimulation):
 
         if self.step_count <= 5:
             try:
-                active_count = len(self.world.eng.vehicle.getIDList())
+                active_count = self.traffic_metrics['active_vehicles']
             except Exception:
                 active_count = -1
             try:
@@ -304,10 +343,24 @@ class LibSignalSimulation(StandardSimulation):
 
     def close(self):
         if self.world is not None and getattr(self.world, 'eng', None) is not None:
-            close_fn = getattr(self.world.eng, 'close', None)
+            eng = self.world.eng
+            close_fn = getattr(eng, 'close', None)
             if callable(close_fn):
                 try:
-                    close_fn()
+                    if self.config['command']['world'] == 'sumo' and not self.world.interface_flag:
+                        # TraCI Connection.close() 默认会无限等待 SUMO-GUI 进程退出。
+                        # 先关闭协议连接，再有界地回收由 traci.start() 创建的子进程。
+                        process = getattr(eng, '_process', None)
+                        close_fn(False)
+                        if process is not None and process.poll() is None:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=5)
+                    else:
+                        close_fn()
                 except Exception:
                     pass
         self._started = False
@@ -392,6 +445,7 @@ class LibSignalInterface(StandardInterface):
         }
         self._cached_netdata = None
         self._last_actions = None
+        self._last_action_pairs = None
         self._action_interval = (
             sim.config['trainer'].get('action_interval', 10) if sim.config and 'trainer' in sim.config else 10
         )
@@ -414,6 +468,42 @@ class LibSignalInterface(StandardInterface):
                 actions.extend(np.asarray(agent_actions).reshape(-1).astype(int).tolist())
         return actions
 
+    def _collect_action_pairs(self):
+        """Return SUMO actions paired with each agent's bound intersection.
+
+        Per-intersection agents are not guaranteed to have the same order as
+        ``world.intersections``.  Preserve the agent/intersection binding so a
+        MaxPressure decision cannot be written to a different traffic light.
+        Multi-intersection agents continue to fall back to world order.
+        """
+        if not self.sim.agents:
+            return []
+
+        pairs = []
+        world_intersections = list(getattr(self.sim.world, 'intersections', []) or [])
+        world_offset = 0
+
+        for agent in self.sim.agents:
+            ob = agent.get_ob()
+            phase = agent.get_phase()
+            agent_actions = agent.get_action(ob, phase, test=True)
+            if np.isscalar(agent_actions):
+                actions = [int(agent_actions)]
+            else:
+                actions = np.asarray(agent_actions).reshape(-1).astype(int).tolist()
+
+            if len(actions) == 1 and getattr(agent, 'sub_agents', 1) == 1 and hasattr(agent, 'inter_obj'):
+                pairs.append((agent.inter_obj, actions[0]))
+                world_offset += 1
+                continue
+
+            targets = world_intersections[world_offset:world_offset + len(actions)]
+            for inter, action in zip(targets, actions):
+                pairs.append((inter, int(action)))
+            world_offset += len(actions)
+
+        return pairs
+
     def signal_update(self):
         self.sim.signal_complete = False
         try:
@@ -421,19 +511,29 @@ class LibSignalInterface(StandardInterface):
 
             should_make_decision = (self.sim.step_count % self._action_interval == 0)
             if should_make_decision:
-                all_actions = self._collect_actions()
-                self._last_actions = all_actions
+                if self.sim.config['command']['world'] == 'cityflow':
+                    all_actions = self._collect_actions()
+                    self._last_actions = all_actions
+                    action_pairs = []
+                else:
+                    action_pairs = self._collect_action_pairs()
+                    self._last_action_pairs = action_pairs
+                    all_actions = [action for _, action in action_pairs]
             else:
-                all_actions = self._last_actions if self._last_actions is not None else []
+                if self.sim.config['command']['world'] == 'cityflow':
+                    all_actions = self._last_actions if self._last_actions is not None else []
+                    action_pairs = []
+                else:
+                    action_pairs = self._last_action_pairs if self._last_action_pairs is not None else []
+                    all_actions = [action for _, action in action_pairs]
 
             world_name = self.sim.config['command']['world']
             if all_actions:
                 if world_name == 'cityflow':
                     self.sim._pending_actions = all_actions[:len(self.sim.world.intersections)]
                 else:
-                    for idx, action in enumerate(all_actions):
-                        if idx < len(self.sim.world.intersections):
-                            inter = self.sim.world.intersections[idx]
+                    for inter, action in action_pairs:
+                        if inter is not None:
                             inter.pseudo_step(int(action))
 
             self.sim.signal_complete = True

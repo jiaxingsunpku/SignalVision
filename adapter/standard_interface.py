@@ -30,6 +30,8 @@ class StandardArgs:
     # 流量参数
     demand: str = 'fixed'              # 流量类型
     scale: float = 2.0                 # 流量倍率
+    flow_file: str = ''                # 本次仿真使用的 SUMO 车流文件
+    combined_file: Optional[str] = None # 本次仿真使用的 sumocfg；空字符串表示直接使用 net/route
     
     # 可视化参数
     enable_db: bool = False            # 是否启用数据库

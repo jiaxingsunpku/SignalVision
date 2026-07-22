@@ -15,10 +15,10 @@
     "nogui": false,
     "enable_db": true,
     "simlen": 3600,
-    "scale": 2,
+    "scale": 3,
     "render_interval": 400,
     "step_delay": 1000,
-    "comment": "完整推理模式：带GUI、带数据库、每步延迟1000ms便于观察"
+    "comment": "完整推理模式：带GUI、带数据库、使用适中增强车流"
   },
   "inference_quick": {
     "description": "Dashboard快速推理",
@@ -63,7 +63,7 @@
     "2. enable_db=false: 不启用TDengine数据库，减少开销",
     "3. enable_db=true + nogui=true: 数据库模式，适合数据收集和分析",
     "4. simlen: 仿真时长（秒），可根据需要调整",
-    "5. scale: 流量倍率，scale=2表示2倍流量",
+    "5. scale: 流量倍率，GUI默认scale=3使用适中增强车流",
     "6. Dashboard推理建议使用 nogui=true 以提高性能"
   ]
 }

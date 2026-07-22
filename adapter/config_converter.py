@@ -133,6 +133,8 @@ class ConfigConverter:
         args.agent = cls.resolve_agent(std_args.tsc)
         args.network = cls.resolve_network(std_args.sim, args.world)
         args.dataset = std_args.dataset or 'onfly'
+        args.flow_file = std_args.flow_file
+        args.combined_file = std_args.combined_file
 
         args.interface = std_args.interface
         args.gui = not std_args.nogui
@@ -178,6 +180,8 @@ class ConfigConverter:
 
         std_args.demand = config.get('demand', 'fixed')
         std_args.scale = config.get('scale', 2.0)
+        std_args.flow_file = config.get('flow_file', '')
+        std_args.combined_file = config.get('combined_file')
 
         std_args.render_interval = config.get('render_interval', 400)
         std_args.step_delay = config.get('step_delay', 0.0)
