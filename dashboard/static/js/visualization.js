@@ -37,7 +37,7 @@ class MapVisualization {
             showJunctions: true,
             showLabels: false,
             showCongestion: true,
-            lineWidth: 2,
+            lineWidth: 1.8,
             nodeSize: 6,
             enableLaneFilter: true,
             minLanes: 2
@@ -45,22 +45,22 @@ class MapVisualization {
         
         // 颜色配置
         this.colors = {
-            background: '#0f0f0f',
-            edge: '#666666',
-            node: '#888888',
-            junction: '#00bcd4',
-            junctionTrafficLight: '#00bcd4',
-            junctionNormal: '#888888',
-            text: '#cccccc',
-            selected: '#ffeb3b',
-            hovered: '#ff9800',
+            background: '#f5f9fa',
+            edge: '#8da2a8',
+            node: '#6f858b',
+            junction: '#0b9488',
+            junctionTrafficLight: '#0b9488',
+            junctionNormal: '#71878d',
+            text: '#415d63',
+            selected: '#705cc9',
+            hovered: '#d98220',
             // 拥堵级别颜色
             congestion: {
-                free: '#4caf50',      // 0-0.2: 畅通
-                slow: '#8bc34a',      // 0.2-0.4: 缓慢
-                moderate: '#ffeb3b',  // 0.4-0.6: 拥堵
-                heavy: '#ff9800',     // 0.6-0.8: 严重拥堵
-                jammed: '#f44336'     // 0.8-1.0: 瘫痪
+                free: '#17875f',      // 0-0.2: 畅通
+                slow: '#6d9c2c',      // 0.2-0.4: 缓慢
+                moderate: '#c79a16',  // 0.4-0.6: 拥堵
+                heavy: '#d87820',     // 0.6-0.8: 严重拥堵
+                jammed: '#d34a4a'     // 0.8-1.0: 瘫痪
             }
         };
         
@@ -353,7 +353,8 @@ class MapVisualization {
     drawEdges() {
         if (!this.networkData.edge) return;
         
-        this.ctx.lineWidth = this.displayConfig.lineWidth;
+        // 线宽保持为屏幕像素，不随“适应全图”的低缩放比例变得不可见。
+        this.ctx.lineWidth = this.displayConfig.lineWidth / Math.max(this.scale, 0.01);
         this.ctx.lineCap = 'round';
         
         let renderedCount = 0;
@@ -428,7 +429,8 @@ class MapVisualization {
                 this.ctx.fillStyle = this.colors.node;
             }
             this.ctx.beginPath();
-            this.ctx.arc(node.x, node.y, this.displayConfig.nodeSize - 2, 0, 2 * Math.PI);
+            const radius = 1.15 / Math.max(this.scale, 0.01);
+            this.ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI);
             this.ctx.fill();
         }
     }
@@ -444,16 +446,17 @@ class MapVisualization {
             const hasCongestionData = summary.congestion_level !== undefined && summary.congestion_level !== null;
             const congestionLevel = hasCongestionData ? summary.congestion_level : 0;
             
-            let radius = this.displayConfig.nodeSize;
+            const visualScale = Math.max(this.scale, 0.01);
+            let radius = 4 / visualScale;
             let color = isTrafficLight ? this.colors.junctionTrafficLight : this.colors.junctionNormal;
             
             // 高亮选中和悬停
             if (this.selectedJunction === id) {
                 color = this.colors.selected;
-                radius += 3;
+                radius += 3 / visualScale;
             } else if (this.hoveredElement?.type === 'junction' && this.hoveredElement.id === id) {
                 color = this.colors.hovered;
-                radius += 2;
+                radius += 2 / visualScale;
             } else if (this.displayConfig.showCongestion) {
                 // 无数据时视为畅通(0.0)，直接渲染为绿色而不是灰色。
                 color = this.getCongestionColor(congestionLevel);
@@ -467,15 +470,15 @@ class MapVisualization {
             
             // 绘制边框
             this.ctx.strokeStyle = '#000';
-            this.ctx.lineWidth = 1;
+            this.ctx.lineWidth = 1 / visualScale;
             this.ctx.stroke();
             
             // 如果是信号灯路口，绘制额外标记
             if (isTrafficLight) {
                 this.ctx.strokeStyle = '#fff';
-                this.ctx.lineWidth = 2;
+                this.ctx.lineWidth = 1.5 / visualScale;
                 this.ctx.beginPath();
-                this.ctx.arc(inter.x, inter.y, radius + 2, 0, 2 * Math.PI);
+                this.ctx.arc(inter.x, inter.y, radius + 2 / visualScale, 0, 2 * Math.PI);
                 this.ctx.stroke();
             }
         }
@@ -839,4 +842,3 @@ class MapVisualization {
         }
     }
 }
-

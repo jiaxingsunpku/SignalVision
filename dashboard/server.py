@@ -15,6 +15,7 @@ from pathlib import Path
 
 from integration.junction_agent import JunctionManager
 from simulation_manager import SimulationManager
+from realtime_comparison_manager import RealtimeComparisonManager
 from dashboard_tools import get_data_controller, get_models_controller, get_comparison_controller
 
 # 导入适配器（用于加载网络数据）
@@ -78,6 +79,7 @@ MAP_DIR = DASHBOARD_ROOT / config['map']['directory']
 
 # 全局仿真管理器
 simulation_manager = SimulationManager(PROJECT_ROOT)
+realtime_comparison_manager = RealtimeComparisonManager(PROJECT_ROOT)
 
 # 全局工具控制器（延迟初始化）
 data_controller = None
@@ -554,6 +556,11 @@ def load_named_network_data(map_name):
 def start_simulation():
     """启动SUMO仿真"""
     try:
+        if realtime_comparison_manager.running:
+            return jsonify({
+                'success': False,
+                'message': '请先停止 FixedTime vs PPO 对比实验'
+            }), 409
         data = request.get_json() or {}
         config_type = data.get('config', 'maxpressure')
         sim_name = data.get('sim_name')  # 可选：指定场景名称
@@ -675,11 +682,13 @@ def get_realtime_data():
             current_time = dashboard_state.get('simulation_time', 0)
             current_step = dashboard_state.get('current_step', 0)
             total_steps = dashboard_state.get('total_steps', 3600)
+            traffic_metrics = dashboard_state.get('traffic_metrics', {})
         else:
             sim_status = simulation_manager.get_status()
             current_time = sim_status.get('current_time', 0)
             current_step = current_time
             total_steps = 3600
+            traffic_metrics = {}
         
         # 调试输出（每100步输出一次）
         if current_step % 100 == 0 and current_step > 0:
@@ -702,7 +711,12 @@ def get_realtime_data():
                 'total_vehicles': total_vehicles,
                 'avg_speed': round(avg_speed, 2),
                 'total_waiting': total_waiting,
-                'active_junctions': len(junctions_summary)
+                'active_junctions': len(junctions_summary),
+                'active_vehicles': traffic_metrics.get('active_vehicles', total_vehicles),
+                'departed_step': traffic_metrics.get('departed_step', 0),
+                'arrived_step': traffic_metrics.get('arrived_step', 0),
+                'departed_total': traffic_metrics.get('departed_total', 0),
+                'arrived_total': traffic_metrics.get('arrived_total', 0)
             },
             'junctions': junctions_summary
         })
@@ -828,6 +842,146 @@ def get_simulation_presets():
             'presets': [],
             'error': str(e)
         }), 500
+
+
+@app.route('/api/simulation/traffic-profiles', methods=['GET'])
+def get_simulation_traffic_profiles():
+    """获取指定地图可用的车流方案。"""
+    try:
+        sim_name = request.args.get('sim_name') or simulation_manager.sim_config.get_current_map()
+        return jsonify({
+            'success': True,
+            'sim_name': sim_name,
+            'profiles': simulation_manager.sim_config.list_traffic_profiles(sim_name),
+        })
+    except Exception as error:
+        return jsonify({
+            'success': False,
+            'profiles': [],
+            'message': str(error),
+        }), 500
+
+
+@app.route('/api/comparison/realtime/start', methods=['POST'])
+def start_realtime_comparison():
+    """同时启动隔离的 FixedTime 与 PPO 实时对比实验。"""
+    if simulation_manager.running:
+        return jsonify({
+            'success': False,
+            'message': '请先停止当前单算法仿真'
+        }), 409
+    try:
+        data = request.get_json() or {}
+        sim_name = data.get('sim_name') or simulation_manager.sim_config.get_current_map()
+        traffic_profile = data.get('traffic_profile', 'default')
+        gui = data.get('gui', True)
+        if not isinstance(gui, bool):
+            gui = str(gui).lower() not in ('false', '0', 'no', 'off')
+        simlen = int(data.get('simlen', 3600))
+        if simlen <= 0 or simlen > 20000:
+            return jsonify({'success': False, 'message': 'simlen 必须在 1 到 20000 之间'}), 400
+        # 复用受控车流白名单校验，避免 worker 启动后才报告路径错误。
+        resolved_traffic = simulation_manager.sim_config.resolve_traffic_profile(sim_name, traffic_profile)
+        profiles = simulation_manager.sim_config.list_traffic_profiles(sim_name)
+        profile = next((item for item in profiles if item.get('id') == traffic_profile), None)
+        if profile is None and traffic_profile in ('', 'default', None):
+            profile = next((item for item in profiles if item.get('default')), profiles[0] if profiles else None)
+        profile = profile or {'id': traffic_profile, 'name': traffic_profile, 'description': ''}
+        traffic_metadata = {
+            'id': traffic_profile,
+            'name': profile.get('name', traffic_profile),
+            'description': profile.get('description', ''),
+            'flow_file': resolved_traffic.get('flow_file', ''),
+        }
+        result = realtime_comparison_manager.start(
+            sim_name,
+            traffic_profile,
+            simlen,
+            gui=gui,
+            traffic_metadata=traffic_metadata,
+        )
+        return jsonify(result), (200 if result.get('success') else 409)
+    except (TypeError, ValueError, FileNotFoundError) as error:
+        return jsonify({'success': False, 'message': str(error)}), 400
+
+
+@app.route('/api/comparison/realtime/status', methods=['GET'])
+def get_realtime_comparison_status():
+    return jsonify(realtime_comparison_manager.get_status())
+
+
+@app.route('/api/comparison/realtime/history', methods=['GET'])
+def get_realtime_comparison_live_history():
+    """返回当前对比试验自启动以来的曲线序列。"""
+    try:
+        max_points = int(request.args.get('max_points', 600))
+    except (TypeError, ValueError):
+        max_points = 600
+    return jsonify(realtime_comparison_manager.get_live_history(max_points))
+
+
+@app.route('/api/comparison/realtime/stop', methods=['POST'])
+def stop_realtime_comparison():
+    return jsonify(realtime_comparison_manager.stop())
+
+
+@app.route('/api/comparison/realtime/pause', methods=['POST'])
+def pause_realtime_comparison():
+    result = realtime_comparison_manager.pause()
+    return jsonify(result), (200 if result.get('success') else 409)
+
+
+@app.route('/api/comparison/realtime/resume', methods=['POST'])
+def resume_realtime_comparison():
+    result = realtime_comparison_manager.resume()
+    return jsonify(result), (200 if result.get('success') else 409)
+
+
+@app.route('/api/comparison/history', methods=['GET'])
+def list_realtime_comparison_history():
+    """列出已持久化的实时对比试验。"""
+    try:
+        limit = int(request.args.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    return jsonify(realtime_comparison_manager.list_history(limit))
+
+
+@app.route('/api/comparison/history/<session_id>', methods=['GET'])
+def get_realtime_comparison_history(session_id):
+    """读取一次历史试验的设置、汇总与完整时间序列。"""
+    result = realtime_comparison_manager.get_history(session_id)
+    return jsonify(result), (200 if result.get('success') else 404)
+
+
+@app.route('/api/comparison/history/<session_id>', methods=['DELETE'])
+def delete_realtime_comparison_history(session_id):
+    """删除单条历史试验（后端移入本地回收目录）。"""
+    result = realtime_comparison_manager.delete_history(session_id)
+    return jsonify(result), (200 if result.get('success') else 404)
+
+
+@app.route('/api/comparison/history/delete-bulk', methods=['POST'])
+def delete_realtime_comparison_history_bulk():
+    """按创建日期或实际运行步数批量删除历史试验。"""
+    data = request.get_json() or {}
+    mode = data.get('mode')
+    value = data.get('value')
+    try:
+        if mode == 'before_date':
+            from datetime import date
+            value = str(value or '')
+            date.fromisoformat(value)
+        elif mode == 'shorter_than':
+            value = int(value)
+            if value <= 0 or value > 20000:
+                raise ValueError('实际运行步数必须在 1 到 20000 之间')
+        else:
+            raise ValueError('请选择有效的批量删除条件')
+    except (TypeError, ValueError) as error:
+        return jsonify({'success': False, 'message': str(error)}), 400
+    result = realtime_comparison_manager.delete_history_bulk(mode, value)
+    return jsonify(result), (200 if result.get('success') else 400)
 
 
 # ========== 启动服务器 ==========

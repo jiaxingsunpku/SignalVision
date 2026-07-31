@@ -437,7 +437,7 @@ class JunctionPanel {
         const chartHeight = height - padding.top - padding.bottom;
 
         ctx.save();
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+        ctx.strokeStyle = 'rgba(80, 112, 119, 0.15)';
         ctx.lineWidth = 1;
 
         for (let i = 0; i <= 4; i++) {
@@ -456,7 +456,7 @@ class JunctionPanel {
             ctx.stroke();
         }
 
-        ctx.fillStyle = 'rgba(203, 213, 225, 0.58)';
+        ctx.fillStyle = 'rgba(65, 93, 99, 0.64)';
         ctx.font = '11px "Segoe UI", sans-serif';
         ctx.fillText('高', 9, padding.top + 5);
         ctx.fillText('低', 9, padding.top + chartHeight);

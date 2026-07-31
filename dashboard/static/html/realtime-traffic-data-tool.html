@@ -2,21 +2,256 @@
     <div class="tool-header">
         <h2>📊 实时交通数据</h2>
         <div class="tool-header-info">
-            <span class="header-badge">TDengine</span>
-            <span class="header-text">查看实时交通数据与数据库面板</span>
+            <span class="header-badge">SV 实时</span>
+            <span class="header-text">路口车辆、等待与拥堵状态</span>
         </div>
         <button class="close-btn" onclick="dashboard.closeTool()">×</button>
     </div>
     
     <div class="tool-content">
-        <div class="tdengine-container">
-            <div class="tdengine-info" id="tdengine-loading">
-                <div class="loading-spinner">⏳</div>
-                <p>正在连接 TDengine 数据管理界面...</p>
-                <p class="info-text">地址: <span id="tdengine-url"></span></p>
-                <p class="info-text">如无法显示，请确认 TDengine 服务已启动</p>
+        <div class="realtime-data-panel">
+            <div class="realtime-comparison-board" id="realtime-comparison-board" style="display: none;">
+                <div class="realtime-comparison-heading">
+                    <div>
+                        <h3>FixedTime vs PPO 实时对比</h3>
+                        <p>相同地图、车流和仿真时长；上下两组使用独立 SUMO 进程</p>
+                    </div>
+                    <div class="comparison-live-controls">
+                        <span class="realtime-status-pill running" id="comparison-data-status">启动中</span>
+                        <button class="comparison-control-btn pause" type="button"
+                                id="comparison-pause-btn"
+                                onclick="dashboard.toggleRealtimeComparisonPause()">
+                            ⏸ 暂停试验
+                        </button>
+                        <button class="comparison-control-btn terminate" type="button"
+                                id="comparison-terminate-btn"
+                                onclick="dashboard.terminateRealtimeComparison()">
+                            ■ 终止试验
+                        </button>
+                    </div>
+                </div>
+
+                <section class="comparison-experiment fixedtime">
+                    <div class="comparison-experiment-header">
+                        <div>
+                            <span class="comparison-tag fixedtime">基线</span>
+                            <h3>FixedTime 固定配时</h3>
+                        </div>
+                        <span id="comparison-fixedtime-step">等待启动</span>
+                    </div>
+                    <div class="comparison-experiment-body">
+                        <div class="comparison-metrics">
+                            <div><span>在途车辆</span><strong id="comparison-fixedtime-active">--</strong></div>
+                            <div><span>排队车辆</span><strong id="comparison-fixedtime-waiting">--</strong></div>
+                            <div><span>成功驶出</span><strong id="comparison-fixedtime-arrived">--</strong></div>
+                            <div><span>平均拥堵</span><strong id="comparison-fixedtime-congestion">--</strong></div>
+                        </div>
+                        <div class="comparison-chart-cell">
+                            <h4>路网负载</h4>
+                            <canvas id="comparison-fixedtime-load-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                        <div class="comparison-chart-cell">
+                            <h4>累计吞吐</h4>
+                            <canvas id="comparison-fixedtime-throughput-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="comparison-experiment ppo">
+                    <div class="comparison-experiment-header">
+                        <div>
+                            <span class="comparison-tag ppo">策略</span>
+                            <h3>PPO-PFRL</h3>
+                        </div>
+                        <span id="comparison-ppo-step">等待启动</span>
+                    </div>
+                    <div class="comparison-experiment-body">
+                        <div class="comparison-metrics">
+                            <div><span>在途车辆</span><strong id="comparison-ppo-active">--</strong></div>
+                            <div><span>排队车辆</span><strong id="comparison-ppo-waiting">--</strong></div>
+                            <div><span>成功驶出</span><strong id="comparison-ppo-arrived">--</strong></div>
+                            <div><span>平均拥堵</span><strong id="comparison-ppo-congestion">--</strong></div>
+                        </div>
+                        <div class="comparison-chart-cell">
+                            <h4>路网负载</h4>
+                            <canvas id="comparison-ppo-load-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                        <div class="comparison-chart-cell">
+                            <h4>累计吞吐</h4>
+                            <canvas id="comparison-ppo-throughput-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                    </div>
+                </section>
             </div>
-            <iframe id="tdengine-iframe" class="tdengine-iframe" frameborder="0" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+
+            <div class="realtime-single-view" id="realtime-single-view">
+            <div class="realtime-summary-grid">
+                <div class="realtime-card">
+                    <div class="realtime-card-label">车辆</div>
+                    <div class="realtime-card-value" id="realtime-total-vehicles">--</div>
+                </div>
+                <div class="realtime-card">
+                    <div class="realtime-card-label">等待</div>
+                    <div class="realtime-card-value warning" id="realtime-total-halting">--</div>
+                </div>
+                <div class="realtime-card">
+                    <div class="realtime-card-label">活跃路口</div>
+                    <div class="realtime-card-value" id="realtime-active-junctions">--</div>
+                </div>
+                <div class="realtime-card">
+                    <div class="realtime-card-label">平均拥堵</div>
+                    <div class="realtime-card-value" id="realtime-avg-congestion">--</div>
+                </div>
+                <div class="realtime-card">
+                    <div class="realtime-card-label">时间步</div>
+                    <div class="realtime-card-value compact" id="realtime-step">--</div>
+                </div>
+            </div>
+
+            <div class="realtime-toolbar">
+                <div class="realtime-status">
+                    <span class="realtime-status-pill" id="realtime-data-status">加载中</span>
+                    <span class="realtime-updated-at" id="realtime-updated-at">--</span>
+                </div>
+                <button class="realtime-refresh-btn" type="button" onclick="dashboard.refreshRealtimeTrafficData()">刷新</button>
+            </div>
+
+            <div class="realtime-chart-grid">
+                <section class="realtime-chart-card">
+                    <div class="realtime-chart-header">
+                        <div>
+                            <h3>路网负载</h3>
+                            <p>在途车辆与排队车辆，排队越低越好</p>
+                        </div>
+                    </div>
+                    <canvas id="realtime-load-chart" class="realtime-chart-canvas"></canvas>
+                </section>
+                <section class="realtime-chart-card">
+                    <div class="realtime-chart-header">
+                        <div>
+                            <h3>采样周期流量</h3>
+                            <p>相邻刷新间隔内产生与成功驶出车辆</p>
+                        </div>
+                    </div>
+                    <canvas id="realtime-flow-chart" class="realtime-chart-canvas"></canvas>
+                </section>
+                <section class="realtime-chart-card">
+                    <div class="realtime-chart-header">
+                        <div>
+                            <h3>累计吞吐</h3>
+                            <p>累计驶入与驶出，间距越小表示消化能力越强</p>
+                        </div>
+                    </div>
+                    <canvas id="realtime-throughput-chart" class="realtime-chart-canvas"></canvas>
+                </section>
+            </div>
+
+            <div class="realtime-table-wrap">
+                <table class="realtime-data-table">
+                    <thead>
+                        <tr>
+                            <th>路口</th>
+                            <th>类型</th>
+                            <th>车辆</th>
+                            <th>等待</th>
+                            <th>拥堵</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="realtime-data-body"></tbody>
+                </table>
+            </div>
+
+            <div class="realtime-empty" id="realtime-data-empty" style="display: none;">
+                <div class="loading-spinner">⏳</div>
+                <p>正在读取实时交通数据...</p>
+                <p class="info-text">仿真运行时读取实时数据；仿真停止时显示当前路口汇总。</p>
+            </div>
+            </div>
+
+            <section class="comparison-history-panel">
+                <div class="comparison-history-header">
+                    <div>
+                        <h3>历史对比试验</h3>
+                        <p>每次试验自动保存设置和全过程指标，可按行纵向比较</p>
+                    </div>
+                    <button class="realtime-refresh-btn" type="button"
+                            onclick="dashboard.loadComparisonHistory()">刷新记录</button>
+                </div>
+                <div class="comparison-history-filters">
+                    <label class="history-filter-field">
+                        <span>试验日期不早于</span>
+                        <input type="date" id="comparison-history-date-filter">
+                    </label>
+                    <label class="history-filter-field">
+                        <span>实际运行不少于</span>
+                        <span class="history-filter-number">
+                            <input type="number" id="comparison-history-steps-filter"
+                                   min="1" max="20000" step="100" placeholder="例如 1000">
+                            <em>步</em>
+                        </span>
+                    </label>
+                    <div class="history-filter-actions">
+                        <button class="history-action-btn" type="button"
+                                onclick="dashboard.applyComparisonHistoryFilters()">筛选</button>
+                        <button class="history-action-btn secondary" type="button"
+                                onclick="dashboard.resetComparisonHistoryFilters()">重置</button>
+                    </div>
+                    <div class="history-delete-actions">
+                        <button class="history-action-btn danger" type="button"
+                                onclick="dashboard.deleteComparisonHistoryBeforeDate()">删除该日期前记录</button>
+                        <button class="history-action-btn danger" type="button"
+                                onclick="dashboard.deleteShortComparisonHistory()">删除短试验</button>
+                    </div>
+                </div>
+                <p class="comparison-history-filter-summary" id="comparison-history-filter-summary"></p>
+                <div class="comparison-history-table-wrap">
+                    <table class="realtime-data-table comparison-history-table">
+                        <thead>
+                            <tr>
+                                <th>试验时间</th>
+                                <th>地图 / 车流</th>
+                                <th>设置</th>
+                                <th>Fixed 平均排队</th>
+                                <th>PPO 平均排队</th>
+                                <th>排队改善</th>
+                                <th>Fixed / PPO 吞吐</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="comparison-history-body">
+                            <tr><td colspan="8">正在加载历史记录...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="comparison-history-detail" id="comparison-history-detail" style="display: none;">
+                    <div class="comparison-history-detail-header">
+                        <div>
+                            <h4 id="comparison-history-detail-title">历史试验曲线</h4>
+                            <p id="comparison-history-detail-meta"></p>
+                        </div>
+                        <div class="comparison-history-detail-actions">
+                            <button class="history-action-btn history-back-btn" type="button"
+                                    onclick="dashboard.closeComparisonHistoryDetail(true)">
+                                ← 返回历史列表
+                            </button>
+                            <button class="close-btn comparison-history-close" type="button"
+                                    aria-label="关闭历史曲线"
+                                    onclick="dashboard.closeComparisonHistoryDetail(true)">×</button>
+                        </div>
+                    </div>
+                    <div class="comparison-history-chart-grid">
+                        <div class="comparison-chart-cell">
+                            <h4>平均排队过程</h4>
+                            <canvas id="comparison-history-waiting-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                        <div class="comparison-chart-cell">
+                            <h4>累计成功驶出</h4>
+                            <canvas id="comparison-history-throughput-chart" class="realtime-chart-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </div>
     </div>
 </div>

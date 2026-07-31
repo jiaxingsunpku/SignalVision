@@ -11,6 +11,54 @@ import sys
 
 class SimulationConfig:
     """仿真配置类"""
+
+    TRAFFIC_PROFILES = {
+        'ezhou': [
+            {
+                'id': 'original',
+                'name': '原始全量车流',
+                'description': '原始路网全量车流（约 35.2 万辆）',
+                'flow_file': 'raw_data/ezhou/ezhou.rou.xml',
+            },
+            {
+                'id': 'enhanced',
+                'name': '拥堵增强基础版',
+                'description': '重点区域增强车流（约 4438 辆）',
+                'flow_file': 'raw_data/ezhou/ezhou_congested.rou.xml',
+            },
+            {
+                'id': 'enhanced_3x',
+                'name': '拥堵增强 3x',
+                'description': '重点区域增强方案，约 5608 辆',
+                'flow_file': 'raw_data/ezhou/ezhou_congested_3x.rou.xml',
+            },
+            {
+                'id': 'enhanced_3x_global_1_5x',
+                'name': '全局增强 1.5x（对比推荐）',
+                'description': '以增强 3x 为基准，全时段和全 OD 均匀扩增到约 8412 辆',
+                'flow_file': 'raw_data/ezhou/ezhou_congested_3x_global_1_5x.rou.xml',
+            },
+            {
+                'id': 'corridor_hotspot_4x',
+                'name': '局部走廊高压 4x（算法对比推荐）',
+                'description': '保留全局 1.5x，并将 J058→J014 北部纵向主走廊提升至 4 倍，约 1.25 万辆',
+                'flow_file': 'raw_data/ezhou/ezhou_corridor_hotspot_4x.rou.xml',
+                'default': True,
+            },
+            {
+                'id': 'enhanced_5x',
+                'name': '拥堵增强 5x',
+                'description': '更高压力车流，约 6166 辆',
+                'flow_file': 'raw_data/ezhou/ezhou_congested_5x.rou.xml',
+            },
+            {
+                'id': 'enhanced_full',
+                'name': '全路网增强车流',
+                'description': '全路网高密度方案（约 35.3 万辆，启动较慢）',
+                'flow_file': 'raw_data/ezhou/ezhou_congested_full.rou.xml',
+            },
+        ],
+    }
     
     # 预设配置模板
     PRESETS = {
@@ -99,7 +147,7 @@ class SimulationConfig:
         'r': 3,
         'y': 5,  # LibSignal黄灯时长
         'simlen': 3600,
-        'scale': 2,
+        'scale': 3,
         'render_interval': 400,
         'offset': 0.05,
         'port': 8020,
@@ -171,6 +219,51 @@ class SimulationConfig:
             'SUMO_MAP_NAME',
             self.dashboard_config.get('map', {}).get('default_map', '81')
         )
+
+    def list_traffic_profiles(self, sim_name=None):
+        """返回指定场景可在 Dashboard 选择的车流方案。"""
+        sim_name = sim_name or self.get_current_map()
+        profiles = self.TRAFFIC_PROFILES.get(sim_name)
+        if not profiles:
+            return [{
+                'id': 'default',
+                'name': '场景默认车流',
+                'description': '使用该场景配置文件中的默认车流',
+                'default': True,
+            }]
+
+        result = []
+        for profile in profiles:
+            item = {key: value for key, value in profile.items() if key != 'flow_file'}
+            flow_path = self.project_root / 'runtime' / 'data' / profile['flow_file']
+            item['available'] = flow_path.exists()
+            result.append(item)
+        return result
+
+    def resolve_traffic_profile(self, sim_name, profile_id):
+        """把前端车流方案解析为受控的 runtime world 参数。"""
+        profiles = self.TRAFFIC_PROFILES.get(sim_name)
+        if not profiles:
+            if profile_id in (None, '', 'default'):
+                return {}
+            raise ValueError(f'场景 {sim_name} 不支持车流方案 {profile_id}')
+
+        if not profile_id:
+            profile = next((item for item in profiles if item.get('default')), profiles[0])
+        else:
+            profile = next((item for item in profiles if item['id'] == profile_id), None)
+        if profile is None:
+            raise ValueError(f'场景 {sim_name} 不支持车流方案 {profile_id}')
+
+        flow_file = profile['flow_file']
+        flow_path = self.project_root / 'runtime' / 'data' / flow_file
+        if not flow_path.exists():
+            raise FileNotFoundError(f'车流文件不存在: {flow_file}')
+        return {
+            'flow_file': flow_file,
+            # 直接给 SUMO 传入 net + route，避免场景 sumocfg 固定到另一份车流。
+            'combined_file': '',
+        }
     
     def generate_args(self, preset='maxpressure', sim_name=None, inference_mode='inference', **overrides):
         """
@@ -189,6 +282,8 @@ class SimulationConfig:
         if sim_name is None:
             sim_name = self.get_current_map()
         
+        traffic_profile = overrides.pop('traffic_profile', None)
+
         # 合并参数：默认参数 + 推理配置 + 预设参数 + 覆盖参数
         args = self.DEFAULT_ARGS.copy()
         
@@ -217,6 +312,14 @@ class SimulationConfig:
         
         # 应用覆盖参数
         args.update(overrides)
+        args.update(self.resolve_traffic_profile(sim_name, traffic_profile))
+
+        # GUI 预设必须显式切到 traci。libsumo 适合无界面快速运行，
+        # 但不会把 SUMO GUI 窗口稳定地挂到本机桌面。
+        if args.get('nogui') is False and 'interface' not in args:
+            args['interface'] = 'traci'
+        elif args.get('nogui') is True and 'interface' not in args:
+            args['interface'] = 'libsumo'
         
         # 转换为命令行参数列表（按照原始脚本的顺序）
         # 参考 maxpressure_test.sh 的参数顺序
@@ -224,10 +327,10 @@ class SimulationConfig:
             # 邻接矩阵参数
             'normalized_k',
             # 仿真参数
-            'sim', 'demand', 'gmin', 'r', 'y', 'simlen', 'scale', 
+            'sim', 'demand', 'flow_file', 'combined_file', 'gmin', 'r', 'y', 'simlen', 'scale',
             'render_interval', 'offset', 'port',
             # 可视化
-            'nogui',
+            'nogui', 'interface',
             # 数据库
             'enable_db',
             # Dashboard特有参数
@@ -256,6 +359,8 @@ class SimulationConfig:
                 if isinstance(value, bool):
                     if value:
                         cmd_args.append(f'-{key}')
+                    elif key == 'nogui':
+                        cmd_args.extend([f'-{key}', 'false'])
                 elif value is not None:
                     cmd_args.extend([f'-{key}', str(value)])
         
@@ -265,6 +370,8 @@ class SimulationConfig:
                 if isinstance(value, bool):
                     if value:
                         cmd_args.append(f'-{key}')
+                    elif key == 'nogui':
+                        cmd_args.extend([f'-{key}', 'false'])
                 elif value is not None:
                     cmd_args.extend([f'-{key}', str(value)])
         
